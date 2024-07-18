@@ -108,11 +108,10 @@ class DhLottery:
       iframe = self.driver.find_element(By.TAG_NAME, 'iframe')
       self.driver.switch_to.frame(iframe)
 
-      for i in range(count):
-        # 랜덤으로 조 선택
-        jo = randint(1, 5)
-        jo_button = self.driver.find_element(By.XPATH, f'//span[@class="notranslate lotto720_box jogroup num{jo}"]')
-        jo_button.click()
+      if count == 5:
+        # # 같은조 5매 선택
+        # jo_button = self.driver.find_element(By.XPATH, f'//span[@class="notranslate lotto720_box jogroup all"]')
+        # jo_button.click()
 
         # 자동 번호 선택
         auto_button = self.driver.find_element(By.CLASS_NAME, 'lotto720_btn_auto_number')
@@ -121,6 +120,20 @@ class DhLottery:
         # 구매 등록
         confirm_button = self.driver.find_element(By.CLASS_NAME, 'lotto720_btn_confirm_number')
         confirm_button.click()
+      else:
+        for i in range(count):
+          # 랜덤으로 조 선택
+          jo = randint(1, 5)
+          jo_button = self.driver.find_element(By.XPATH, f'//span[@class="notranslate lotto720_box jogroup num{jo}"]')
+          jo_button.click()
+
+          # 자동 번호 선택
+          auto_button = self.driver.find_element(By.CLASS_NAME, 'lotto720_btn_auto_number')
+          auto_button.click()
+
+          # 구매 등록
+          confirm_button = self.driver.find_element(By.CLASS_NAME, 'lotto720_btn_confirm_number')
+          confirm_button.click()
 
       # 구매 버튼
       buy1_button = self.driver.find_element(By.CLASS_NAME, 'lotto720_btn_pay')
