@@ -3,31 +3,31 @@ name: Build Docker Image
 on:
   push:
     branches:
-    - 'release/v**'
+      - "release/v**"
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - name: Code checkout
-      uses: actions/checkout@v4
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-    - name: Login to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
-    - name: Detect branch
-      id: branch
-      run: |
-        branch=${{ github.ref_name }}
-        major_version=${branch##*/}
-        minor_version=$(TZ=Asia/Seoul date +%y%m%d-%H%M)
-        echo "major_version=${major_version}" >> "$GITHUB_ENV"
-        echo "minor_version=${minor_version}" >> "$GITHUB_ENV"
-    - name: Build and Push the Docker Image
-      uses: docker/build-push-action@v5
-      with:
-        push: true
-        tags: chaeyk/lottery-agent:latest,chaeyk/lottery-agent:${{ env.major_version }},chaeyk/lottery-agent:${{ env.major_version }}-${{ env.minor_version }}
+      - name: Code checkout
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Detect branch
+        id: branch
+        run: |
+          branch=${{ github.ref_name }}
+          major_version=${branch##*/}
+          minor_version=$(TZ=Asia/Seoul date +%y%m%d-%H%M)
+          echo "major_version=${major_version}" >> "$GITHUB_ENV"
+          echo "minor_version=${minor_version}" >> "$GITHUB_ENV"
+      - name: Build and Push the Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          push: true
+          tags: ryube/lottery-agent:latest,ryube/lottery-agent:${{ env.major_version }},ryube/lottery-agent:${{ env.major_version }}-${{ env.minor_version }}

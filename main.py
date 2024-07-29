@@ -127,10 +127,10 @@ def do_lottery(args: Namespace, driver: WebDriver, message: Message):
 
 def take_screenshot(driver: WebDriver) -> bytes:
   return driver.get_screenshot_as_png()
-
+userid = getenv('DHL_USERID')
 bottoken = getenv('TLG_BOTTOKEN')
 chatid = getenv('TLG_CHATID')
-message = Message(bottoken=bottoken, chatid=chatid)
+message = Message(bottoken=bottoken, chatid=chatid, message=f'🤑🤑🤑 유저ID: {userid} 🤑🤑🤑')
 
 driver = None
 try:
