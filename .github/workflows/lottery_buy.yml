@@ -2,19 +2,19 @@ name: Lottery purchase
 
 on:
   schedule:
-  - cron: 00 10 * * 1 # every Monday on 07:00 PM (KST)
+    - cron: 00 10 * * 1 # every Monday on 07:00 PM (KST)
   workflow_dispatch: {}
 
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-    - name: Check result
-      uses: chaeyk/lottery-buy-action@v1
-      with:
-        username: ${{ secrets.DHL_USERID }}
-        password: ${{ secrets.DHL_PASSWORD }}
-        telegram-bot-token: ${{ secrets.TLG_BOTTOKEN }}
-        telegram-chatid: ${{ secrets.TLG_CHATID }}
-        lo40: ${{ vars.LO40_COUNT }}
-        lp72: ${{ vars.LP72_COUNT }}
+      - name: Check result
+        uses: ryube/lottery-buy-action@v1
+        with:
+          username: ${{ secrets.DHL_USERID }}
+          password: ${{ secrets.DHL_PASSWORD }}
+          telegram-bot-token: ${{ secrets.TLG_BOTTOKEN }}
+          telegram-chatid: ${{ secrets.TLG_CHATID }}
+          lo40: ${{ vars.LO40_COUNT }}
+          lp72: ${{ vars.LP72_COUNT }}
