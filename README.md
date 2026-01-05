@@ -6,6 +6,25 @@
 
 ## 준비
 
+### 방법 1: uv 사용 (권장)
+
+```bash
+# uv 설치 (아직 설치하지 않은 경우)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 가상환경 생성 및 패키지 설치
+uv venv
+uv pip install -r requirements.txt
+```
+
+또는 `uv run`을 사용하면 가상환경을 자동으로 관리합니다:
+
+```bash
+uv run python main.py buy --lo40 1
+```
+
+### 방법 2: pip 사용
+
 ```bash
 pip3 install -r requirements.txt
 ```
@@ -23,7 +42,12 @@ pip3 install -r requirements.txt
 
 ### 구매
 ```bash
-python3 main.py [--headless/--no-headless] buy [-h] [--lo40 n] [--lp72 n] [--dryrun/--no-dryrun]
+# uv 사용 (권장)
+uv run python main.py [--headless/--no-headless] buy [-h] [--lo40 n] [--lp72 n] [--dryrun/--no-dryrun]
+
+# 또는 가상환경 활성화 후
+source .venv/bin/activate  # uv venv로 생성한 경우
+python main.py [--headless/--no-headless] buy [-h] [--lo40 n] [--lp72 n] [--dryrun/--no-dryrun]
 ```
 
 * --headless : 브라우저를 화면에 보여주지 않은 상태로 실행한다
@@ -34,10 +58,27 @@ python3 main.py [--headless/--no-headless] buy [-h] [--lo40 n] [--lp72 n] [--dry
 
 ### 당첨 확인
 ```bash
-python3 main.py [--headless/--no-headless] check {lo40,lp72}
+# uv 사용 (권장)
+uv run python main.py [--headless/--no-headless] check {lo40,lp72}
+
+# 또는 가상환경 활성화 후
+source .venv/bin/activate  # uv venv로 생성한 경우
+python main.py [--headless/--no-headless] check {lo40,lp72}
 ```
 
 * --headless : 브라우저를 화면에 보여주지 않은 상태로 실행한다
 * -h : 도움말
 * lo40 : 로또 6/45
 * lp72 : 연금복권 720+
+
+## 테스트
+
+### 로그인 테스트
+```bash
+uv run python test_login.py
+```
+
+### 모든 함수 테스트
+```bash
+uv run python test_all_functions.py
+```
