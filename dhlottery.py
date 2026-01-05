@@ -123,6 +123,24 @@ class DhLottery:
       traceback.print_exc()
       return ''
 
+  def _check_purchase_limit_popup(self):
+    """구매한도 팝업 확인"""
+    try:
+      # 구매한도 팝업 확인
+      limit_popup = self.driver.find_element(By.ID, 'recommend720Plus')
+      if limit_popup.is_displayed():
+        try:
+          # 팝업 내용 읽기
+          cont1 = limit_popup.find_element(By.XPATH, './/p[@class="cont1"]')
+          message = cont1.text.strip()
+          print(f'[구매한도] 구매한도 팝업 발견: {message[:100]}...')
+          return message
+        except:
+          return '구매한도에 도달했습니다.'
+    except:
+      pass
+    return None
+
   # 로또 6/45
   def buyLo40(self, count: int, dryrun: bool) -> str:
     try:
@@ -148,14 +166,41 @@ class DhLottery:
       # 수량 확인 버튼
       select_num_button = self.driver.find_element(By.ID, 'btnSelectNum')
       select_num_button.click()
+      time.sleep(1)
 
       if not dryrun:
         # 구매 버튼 누름
         buy_button = self.driver.find_element(By.NAME, 'btnBuy')
         buy_button.click()
+        time.sleep(1)
+
+        # 구매한도 팝업 확인 (구매 버튼 클릭 후)
+        limit_message = self._check_purchase_limit_popup()
+        if limit_message:
+          # 팝업 닫기
+          try:
+            close_button = self.driver.find_element(By.XPATH, '//div[@id="recommend720Plus"]//a[contains(@href, "closeRecomd720Popup")]')
+            close_button.click()
+            time.sleep(1)
+          except:
+            pass
+          raise Exception(f'구매한도 초과: {limit_message}')
 
         # 구매 확인 누름
         self.driver.execute_script('closepopupLayerConfirm(true)')
+        time.sleep(1)
+
+        # 구매한도 팝업 다시 확인 (구매 확인 후)
+        limit_message = self._check_purchase_limit_popup()
+        if limit_message:
+          # 팝업 닫기
+          try:
+            close_button = self.driver.find_element(By.XPATH, '//div[@id="recommend720Plus"]//a[contains(@href, "closeRecomd720Popup")]')
+            close_button.click()
+            time.sleep(1)
+          except:
+            pass
+          raise Exception(f'구매한도 초과: {limit_message}')
 
         # 구매 결과 확인
         report_row = self.driver.find_element(By.ID, 'reportRow')
