@@ -62,60 +62,52 @@ class DhLottery:
       raise
 
   def getBalance(self) -> str:
-    self.driver.get('https://dhlottery.co.kr')
-    time.sleep(2)
-    
-    # 잔고 정보를 찾는 여러 방법 시도
     try:
-      # 방법 1: 기존 방식
-      money = WebDriverWait(self.driver, 5).until(
-        EC.presence_of_element_located((By.XPATH, '//li[@class="money"]/a/strong'))
-      )
-      balance_text = money.text.strip()
-      # "원"으로 끝나는 텍스트만 반환 (잔고 형식)
-      if '원' in balance_text and len(balance_text) < 50:
-        return balance_text
-    except:
-      pass
-    
-    try:
-      # 방법 2: 다른 선택자 시도
-      money = self.driver.find_element(By.XPATH, '//*[contains(@class, "money")]//strong')
-      balance_text = money.text.strip()
-      if '원' in balance_text and len(balance_text) < 50:
-        return balance_text
-    except:
-      pass
-    
-    try:
-      # 방법 3: 마이페이지로 이동해서 확인
+      # 마이페이지로 이동해서 확인
       self.driver.get('https://dhlottery.co.kr/mypage/home')
       time.sleep(3)
       
-      # 예치금 또는 잔고 정보 찾기
+      # 잔액 ID로 직접 찾기
       try:
-        # 예치금 정보 찾기
-        balance_elements = self.driver.find_elements(By.XPATH, '//*[contains(text(), "원") and (contains(text(), "예치금") or contains(text(), "잔액") or contains(text(), "잔고"))]')
-        for elem in balance_elements:
-          text = elem.text.strip()
-          if '원' in text and ('예치금' in text or '잔액' in text or '잔고' in text):
-            # 숫자와 원만 추출
-            match = re.search(r'[\d,]+원', text)
-            if match:
-              return match.group()
+        balance_element = WebDriverWait(self.driver, 10).until(
+          EC.presence_of_element_located((By.ID, 'totalAmt'))
+        )
+        balance_text = balance_element.text.strip()
+        # 숫자와 원이 포함된 텍스트 추출
+        match = re.search(r'[\d,]+원', balance_text)
+        if match:
+          return match.group()
+        # 원이 없으면 원 추가
+        if balance_text and balance_text.replace(',', '').replace('원', '').isdigit():
+          if '원' not in balance_text:
+            return f'{balance_text}원'
+          return balance_text
       except:
         pass
       
-      # 일반적인 잔고 표시 찾기
-      try:
-        money = self.driver.find_element(By.XPATH, '//*[contains(@class, "balance") or contains(@class, "money")]//*[contains(text(), "원")]')
-        balance_text = money.text.strip()
-        if '원' in balance_text:
-          match = re.search(r'[\d,]+원', balance_text)
+      # 대체 방법: 다양한 선택자 시도
+      selectors = [
+        (By.ID, 'totalAmt'),
+        (By.XPATH, '//*[@id="totalAmt"]'),
+        (By.CSS_SELECTOR, '#totalAmt'),
+        (By.XPATH, '//*[contains(@id, "totalAmt")]'),
+        (By.XPATH, '//*[contains(text(), "예치금")]'),
+        (By.XPATH, '//*[contains(text(), "잔액")]'),
+      ]
+      
+      for by, selector in selectors:
+        try:
+          element = self.driver.find_element(by, selector)
+          text = element.text.strip()
+          match = re.search(r'[\d,]+원', text)
           if match:
             return match.group()
-      except:
-        pass
+          if text and text.replace(',', '').replace('원', '').isdigit():
+            if '원' not in text:
+              return f'{text}원'
+            return text
+        except:
+          continue
       
       return '잔고 확인 실패 (페이지 구조 확인 필요)'
     except Exception as e:
@@ -250,104 +242,154 @@ class DhLottery:
 
   def check(self, code: str):
     try:
+      print(f'[당첨 확인] {self._code_to_name(code)} 확인 시작...')
+      
       # 구매/당첨 내역 페이지로 이동
+      print('[당첨 확인] 구매/당첨 내역 페이지로 이동 중...')
       self.driver.get('https://dhlottery.co.kr/mypage/mylotteryledger')
       time.sleep(3)
+      print(f'[당첨 확인] 현재 URL: {self.driver.current_url}')
       
       # 페이지가 로드되었는지 확인 (404가 아닌지)
       if 'error' in self.driver.current_url.lower() or '404' in self.driver.page_source[:1000]:
+        print('[당첨 확인] ❌ 페이지 로드 실패 (404 또는 에러)')
         return f'당첨 확인 실패: 구매/당첨 내역 페이지를 찾을 수 없습니다. 페이지 구조가 변경되었을 수 있습니다.'
       
-      # 복권 선택 드롭다운 찾기
+      # 1. 최근 1주일 버튼 클릭
+      print('[당첨 확인] 최근 1주일 버튼 클릭 시도...')
+      week_button_clicked = False
       try:
-        lottoid_dropdown = WebDriverWait(self.driver, 10).until(
-          EC.presence_of_element_located((By.ID, 'lottoId'))
+        week_button = WebDriverWait(self.driver, 10).until(
+          EC.element_to_be_clickable((By.XPATH, '//button[contains(@onclick, "fn_chgDt") and contains(@onclick, "\'2\'")]'))
         )
-        lottoid_dropdown = Select(lottoid_dropdown)
+        week_button.click()
+        time.sleep(1)
+        week_button_clicked = True
+        print('[당첨 확인] ✅ 최근 1주일 버튼 클릭 성공')
+      except:
+        # 다른 방법으로 시도
+        try:
+          week_button = self.driver.find_element(By.XPATH, '//button[contains(text(), "최근 1주일")]')
+          week_button.click()
+          time.sleep(1)
+          week_button_clicked = True
+          print('[당첨 확인] ✅ 최근 1주일 버튼 클릭 성공 (대체 방법)')
+        except:
+          print('[당첨 확인] ⚠️ 최근 1주일 버튼을 찾을 수 없음 (계속 진행)')
+      
+      # 2. 검색 버튼 클릭
+      print('[당첨 확인] 검색 버튼 클릭 시도...')
+      try:
+        search_button = WebDriverWait(self.driver, 10).until(
+          EC.element_to_be_clickable((By.ID, 'btnSrch'))
+        )
+        search_button.click()
+        time.sleep(3)  # 테이블 로딩 대기
+        print('[당첨 확인] ✅ 검색 버튼 클릭 성공, 테이블 로딩 대기 중...')
       except:
         try:
-          lottoid_dropdown = Select(self.driver.find_element(By.NAME, 'lottoId'))
+          search_button = self.driver.find_element(By.XPATH, '//button[@id="btnSrch"]')
+          search_button.click()
+          time.sleep(3)
+          print('[당첨 확인] ✅ 검색 버튼 클릭 성공 (대체 방법)')
         except:
-          return f'당첨 확인 실패: 복권 선택 드롭다운을 찾을 수 없습니다.'
+          print('[당첨 확인] ❌ 검색 버튼을 찾을 수 없음')
+          return f'당첨 확인 실패: 검색 버튼을 찾을 수 없습니다.'
       
-      lottoid_dropdown.select_by_value(code)
-
-      # 당첨여부 선택
+      # 3. 결과 테이블 확인
+      print('[당첨 확인] 결과 테이블 확인 중...')
       try:
-        wingrade_dropdown = Select(self.driver.find_element(By.ID, 'winGrade'))
-      except:
-        wingrade_dropdown = Select(self.driver.find_element(By.NAME, 'winGrade'))
-      
-      wingrade_dropdown.select_by_value('1') # 당첨내역
-
-      # 기간은 1주일 선택
-      try:
-        self.driver.execute_script('changeTerm(7, "1주일")')
-      except:
-        # 스크립트가 없으면 직접 선택 시도
-        pass
-
-      # 조회
-      try:
-        search_button = self.driver.find_element(By.ID, 'submit_btn')
-      except:
-        search_button = self.driver.find_element(By.XPATH, '//button[contains(text(), "조회")]')
-      
-      search_button.click()
-      time.sleep(2)
-
-      # 조회 결과는 iframe 안에 있다.
-      try:
-        iframe = WebDriverWait(self.driver, 10).until(
-          EC.presence_of_element_located((By.ID, 'lottoBuyList'))
+        winning_list = WebDriverWait(self.driver, 10).until(
+          EC.presence_of_element_located((By.ID, 'winning-history-list'))
         )
-        self.driver.switch_to.frame(iframe)
+        print('[당첨 확인] ✅ 결과 테이블 찾음')
       except:
-        # iframe이 없으면 현재 페이지에서 찾기
-        pass
-
+        print('[당첨 확인] ❌ 결과 테이블을 찾을 수 없음')
+        return f'{self._code_to_name(code)} 당첨 없음 (결과 테이블을 찾을 수 없습니다)'
+      
+      # 당첨 결과가 있는지 확인
+      print('[당첨 확인] 테이블 행 수 확인 중...')
       try:
-        page_box = WebDriverWait(self.driver, 10).until(
-          EC.presence_of_element_located((By.ID, 'page_box'))
-        )
-        pages = page_box.find_elements(By.TAG_NAME, 'a')
-        if len(pages) == 0:
+        rows = winning_list.find_elements(By.XPATH, './/li[contains(@class, "whl-row")]')
+        print(f'[당첨 확인] 총 {len(rows)}개의 행을 찾음')
+        if len(rows) == 0:
+          print('[당첨 확인] ⚠️ 행이 없음')
           return f'{self._code_to_name(code)} 당첨 없음'
-      except:
-        # 페이지 박스가 없으면 테이블에서 직접 확인
+      except Exception as e:
+        print(f'[당첨 확인] ❌ 행 찾기 실패: {e}')
+        return f'{self._code_to_name(code)} 당첨 없음'
+      
+      # 복권명 매핑
+      lottery_name_map = {
+        'LO40': '로또645',
+        'LP72': '연금복권720+'
+      }
+      target_lottery_name = lottery_name_map.get(code, '')
+      print(f'[당첨 확인] 대상 복권명: {target_lottery_name}')
+      
+      # 당첨된 항목만 필터링 (당첨금이 "-"가 아니고 "0 원"이 아닌 것)
+      print('[당첨 확인] 당첨 항목 필터링 중...')
+      winning_items = []
+      checked_count = 0
+      matched_count = 0
+      
+      for row in rows:
         try:
-          trs = self.driver.find_elements(By.XPATH, '//table/tbody/tr')
-          if len(trs) == 0:
-            return f'{self._code_to_name(code)} 당첨 없음'
-        except:
-          return f'{self._code_to_name(code)} 당첨 없음'
-
+          checked_count += 1
+          # 복권명 확인 (먼저 복권명으로 필터링)
+          name_elem = row.find_element(By.XPATH, './/div[contains(@class, "col-name")]//span[contains(@class, "whl-txt")]')
+          lottery_name = name_elem.text.strip()
+          
+          # 코드에 맞는 복권만 처리
+          if lottery_name != target_lottery_name:
+            continue
+          
+          matched_count += 1
+          
+          # 당첨금 확인
+          prize_elem = row.find_element(By.XPATH, './/div[contains(@class, "col-am")]//span[contains(@class, "whl-txt")]')
+          prize_text = prize_elem.text.strip()
+          
+          # 당첨결과 확인
+          result_elem = row.find_element(By.XPATH, './/div[contains(@class, "col-result")]//span[contains(@class, "whl-txt")]')
+          result_text = result_elem.text.strip()
+          
+          print(f'[당첨 확인] 행 {checked_count}: {lottery_name}, 당첨금={prize_text}, 결과={result_text}')
+          
+          # 당첨금이 "-"가 아니고 "0 원"이 아니며, 당첨결과가 "미추첨"이 아닌 경우
+          if prize_text != '-' and prize_text != '0 원' and result_text != '미추첨':
+            # 구입일자
+            date_elem = row.find_element(By.XPATH, './/div[contains(@class, "col-date1")]//span[contains(@class, "whl-txt")]')
+            buy_date = date_elem.text.strip()
+            
+            # 회차
+            try:
+              round_elem = row.find_element(By.XPATH, './/div[contains(@class, "col-th")]//span[contains(@class, "whl-txt")]')
+              round_num = round_elem.text.strip()
+            except:
+              round_num = ''
+            
+            winning_items.append(f'{buy_date} {lottery_name} {round_num}회 {prize_text} ({result_text})')
+            print(f'[당첨 확인] ✅ 당첨 항목 추가: {buy_date} {lottery_name} {round_num}회 {prize_text}')
+        except Exception as e:
+          print(f'[당첨 확인] ⚠️ 행 {checked_count} 처리 중 오류: {e}')
+          continue
+      
+      print(f'[당첨 확인] 총 {checked_count}개 행 확인, {matched_count}개 {target_lottery_name} 매칭, {len(winning_items)}개 당첨')
+      
+      if len(winning_items) == 0:
+        print(f'[당첨 확인] ⚠️ 당첨 항목 없음')
+        return f'{self._code_to_name(code)} 당첨 없음'
+      
       bar = '---------------------------------------'
       messages = ['당첨된 게 있다!!!', bar]
-      
-      try:
-        for page in pages:
-          page.click()
-          time.sleep(1)
-          trs = self.driver.find_elements(By.XPATH, '//table/tbody/tr')
-          for tr in trs:
-            buy_date = tr.find_element(By.XPATH, 'td[1]').text
-            lottery_name = tr.find_element(By.XPATH, 'td[2]').text
-            money = tr.find_element(By.XPATH, 'td[7]').text
-            messages.append(f'{buy_date} {lottery_name} {money}')
-      except:
-        # 페이지네이션 없이 직접 테이블 읽기
-        trs = self.driver.find_elements(By.XPATH, '//table/tbody/tr')
-        for tr in trs:
-          buy_date = tr.find_element(By.XPATH, 'td[1]').text
-          lottery_name = tr.find_element(By.XPATH, 'td[2]').text
-          money = tr.find_element(By.XPATH, 'td[7]').text
-          messages.append(f'{buy_date} {lottery_name} {money}')
-      
+      messages.extend(winning_items)
       messages.append(bar)
+      
+      print(f'[당첨 확인] ✅ {len(winning_items)}개 당첨 항목 발견!')
       return '\n'.join(messages)
 
     except Exception as e:
-      print('당첨 확인 실패:', e)
+      print(f'[당첨 확인] ❌ 오류 발생: {e}')
       traceback.print_exc()
       return f'당첨 확인 실패: {e}'
