@@ -148,43 +148,71 @@ class DhLottery:
       self.driver.get('https://el.dhlottery.co.kr/game/TotalGame.jsp?LottoId=LO40')
       print('[로또 구매] 페이지 로드 완료')
 
-      iframe = WebDriverWait(self.driver, 10).until(
+      iframe = WebDriverWait(self.driver, 15).until(
         EC.presence_of_element_located((By.TAG_NAME, 'iframe'))
       )
       self.driver.switch_to.frame(iframe)
       print('[로또 구매] iframe 전환 완료')
       
-      # iframe 내부가 완전히 로드될 때까지 대기
-      time.sleep(2)
+      # iframe 내부가 완전히 로드될 때까지 대기 (더 긴 시간)
+      print('[로또 구매] iframe 내부 로딩 대기 중...')
+      time.sleep(5)
       
-      # 자동 번호 선택 - 직접 버튼 클릭 방식으로 변경
+      # 판매시간 확인 (팝업이 있으면 판매시간이 아님)
+      message = self._get_popup_layer_message()
+      if message:
+        print(f'[로또 구매] ❌ 판매시간 아님: {message}')
+        raise Exception(message)
+      
+      # 자동 번호 선택
       print('[로또 구매] 자동 번호 선택 시도...')
+      auto_selected = False
+      
+      # 방법 1: selectWayTab 함수 사용
       try:
-        # 방법 1: selectWayTab 함수가 로드될 때까지 대기 후 실행
-        WebDriverWait(self.driver, 10).until(
+        print('[로또 구매] 방법 1: selectWayTab 함수 대기 중...')
+        WebDriverWait(self.driver, 15).until(
           lambda driver: driver.execute_script('return typeof selectWayTab === "function"')
         )
         self.driver.execute_script('selectWayTab(1)')
+        time.sleep(1)
+        auto_selected = True
         print('[로또 구매] ✅ 자동 번호 선택 성공 (스크립트)')
-      except Exception as script_error:
-        print(f'[로또 구매] ⚠️ 스크립트 방식 실패, 버튼 클릭 방식 시도: {script_error}')
+      except Exception as e1:
+        print(f'[로또 구매] ⚠️ 방법 1 실패: {str(e1)[:100]}')
+      
+      # 방법 2: 버튼 직접 클릭 (onclick)
+      if not auto_selected:
         try:
-          # 방법 2: 직접 버튼 클릭 (더 안정적)
-          # 자동 번호 선택 탭 버튼 찾기
+          print('[로또 구매] 방법 2: 버튼 클릭 시도...')
           auto_tab = WebDriverWait(self.driver, 10).until(
-            EC.element_to_be_clickable((By.XPATH, '//a[contains(@onclick, "selectWayTab(1)") or contains(@href, "selectWayTab(1)")]'))
+            EC.element_to_be_clickable((By.XPATH, '//a[contains(@onclick, "selectWayTab(1)")]'))
           )
           auto_tab.click()
           time.sleep(1)
-          print('[로또 구매] ✅ 자동 번호 선택 성공 (버튼 클릭)')
-        except Exception as button_error:
-          print(f'[로또 구매] ⚠️ 버튼 클릭 방식도 실패: {button_error}')
-          # 로또는 판매시간이 아니면 팝업이 뜬다.
-          message = self._get_popup_layer_message()
-          if message:
-            print(f'[로또 구매] ❌ 판매시간 아님: {message}')
-            raise Exception(message)
-          raise Exception(f'자동 번호 선택 실패: {button_error}')
+          auto_selected = True
+          print('[로또 구매] ✅ 자동 번호 선택 성공 (버튼 onclick)')
+        except Exception as e2:
+          print(f'[로또 구매] ⚠️ 방법 2 실패: {str(e2)[:100]}')
+      
+      # 방법 3: 자동 번호 선택 탭 찾기 (class나 id로)
+      if not auto_selected:
+        try:
+          print('[로또 구매] 방법 3: 자동 탭 찾기...')
+          # 수동/자동 탭에서 자동 탭 클릭
+          auto_tab = WebDriverWait(self.driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, '//div[@id="check2" or contains(@class, "select_auto")]//a'))
+          )
+          auto_tab.click()
+          time.sleep(1)
+          auto_selected = True
+          print('[로또 구매] ✅ 자동 번호 선택 성공 (탭 클릭)')
+        except Exception as e3:
+          print(f'[로또 구매] ⚠️ 방법 3 실패: {str(e3)[:100]}')
+      
+      if not auto_selected:
+        print('[로또 구매] ❌ 모든 자동 번호 선택 방법 실패')
+        raise Exception('자동 번호 선택을 할 수 없습니다. 페이지 구조가 변경되었을 수 있습니다.')
 
       # 수량 선택
       print(f'[로또 구매] 수량 {count}매 선택...')
