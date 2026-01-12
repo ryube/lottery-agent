@@ -428,7 +428,18 @@ class DhLottery:
       # 구매/당첨 내역 페이지로 이동
       print('[당첨 확인] 구매/당첨 내역 페이지로 이동 중...')
       self.driver.get('https://dhlottery.co.kr/mypage/mylotteryledger')
-      time.sleep(3)
+      
+      # 페이지 로딩 대기 - 검색 버튼이 나타날 때까지 대기
+      print('[당첨 확인] 페이지 로딩 대기 중...')
+      try:
+        WebDriverWait(self.driver, 15).until(
+          EC.presence_of_element_located((By.ID, 'btnSrch'))
+        )
+        print('[당첨 확인] ✅ 페이지 로딩 완료')
+      except:
+        print('[당첨 확인] ⚠️ 페이지 로딩 타임아웃')
+      
+      time.sleep(2)
       print(f'[당첨 확인] 현재 URL: {self.driver.current_url}')
       
       # 페이지가 로드되었는지 확인 (404가 아닌지)
@@ -461,21 +472,34 @@ class DhLottery:
       # 2. 검색 버튼 클릭
       print('[당첨 확인] 검색 버튼 클릭 시도...')
       try:
-        search_button = WebDriverWait(self.driver, 10).until(
+        # JavaScript가 완전히 로드될 때까지 더 긴 대기
+        search_button = WebDriverWait(self.driver, 20).until(
           EC.element_to_be_clickable((By.ID, 'btnSrch'))
         )
+        # 추가 대기 - 버튼이 보이지만 클릭 가능하지 않을 수 있음
+        time.sleep(1)
         search_button.click()
         time.sleep(3)  # 테이블 로딩 대기
         print('[당첨 확인] ✅ 검색 버튼 클릭 성공, 테이블 로딩 대기 중...')
-      except:
+      except Exception as e1:
+        print(f'[당첨 확인] ⚠️ 첫 번째 시도 실패: {e1}')
+        # JavaScript로 직접 클릭
         try:
-          search_button = self.driver.find_element(By.XPATH, '//button[@id="btnSrch"]')
-          search_button.click()
+          print('[당첨 확인] JavaScript로 검색 버튼 클릭 시도...')
+          self.driver.execute_script('document.getElementById("btnSrch").click();')
           time.sleep(3)
-          print('[당첨 확인] ✅ 검색 버튼 클릭 성공 (대체 방법)')
-        except:
-          print('[당첨 확인] ❌ 검색 버튼을 찾을 수 없음')
-          return f'당첨 확인 실패: 검색 버튼을 찾을 수 없습니다.'
+          print('[당첨 확인] ✅ 검색 버튼 클릭 성공 (JavaScript)')
+        except Exception as e2:
+          print(f'[당첨 확인] ⚠️ JavaScript 시도 실패: {e2}')
+          # XPath로 시도
+          try:
+            search_button = self.driver.find_element(By.XPATH, '//button[@id="btnSrch"]')
+            search_button.click()
+            time.sleep(3)
+            print('[당첨 확인] ✅ 검색 버튼 클릭 성공 (XPath)')
+          except Exception as e3:
+            print(f'[당첨 확인] ❌ 모든 방법 실패: {e3}')
+            return f'당첨 확인 실패: 검색 버튼을 찾을 수 없습니다.'
       
       # 3. 결과 테이블 확인
       print('[당첨 확인] 결과 테이블 확인 중...')
