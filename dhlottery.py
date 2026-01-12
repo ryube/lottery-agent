@@ -144,55 +144,79 @@ class DhLottery:
   # 로또 6/45
   def buyLo40(self, count: int, dryrun: bool) -> str:
     try:
+      print(f'[로또 구매] {count}매 구매 시작 (dryrun={dryrun})...')
       self.driver.get('https://el.dhlottery.co.kr/game/TotalGame.jsp?LottoId=LO40')
+      print('[로또 구매] 페이지 로드 완료')
 
       iframe = self.driver.find_element(By.TAG_NAME, 'iframe')
       self.driver.switch_to.frame(iframe)
+      print('[로또 구매] iframe 전환 완료')
 
       # 자동 번호 선택
+      print('[로또 구매] 자동 번호 선택 시도...')
       try:
         self.driver.execute_script('selectWayTab(1)')
-      except:
+        print('[로또 구매] ✅ 자동 번호 선택 성공')
+      except Exception as e:
+        print(f'[로또 구매] ⚠️ 자동 번호 선택 실패: {e}')
         # 로또는 판매시간이 아니면 팝업이 뜬다.
         message = self._get_popup_layer_message()
         if message:
+          print(f'[로또 구매] ❌ 판매시간 아님: {message}')
           raise Exception(message)
         raise
 
       # 수량 선택
+      print(f'[로또 구매] 수량 {count}매 선택...')
       count_dropdown = Select(self.driver.find_element(By.ID, 'amoundApply'))
       count_dropdown.select_by_value(str(count))
+      print('[로또 구매] ✅ 수량 선택 완료')
 
       # 수량 확인 버튼
+      print('[로또 구매] 수량 확인 버튼 클릭...')
       select_num_button = self.driver.find_element(By.ID, 'btnSelectNum')
       select_num_button.click()
       time.sleep(1)
+      print('[로또 구매] ✅ 수량 확인 완료')
 
       if not dryrun:
+        print('[로또 구매] 실제 구매 진행...')
         # 구매 버튼 누름
+        print('[로또 구매] 구매 버튼 클릭...')
         buy_button = self.driver.find_element(By.NAME, 'btnBuy')
         buy_button.click()
-        time.sleep(1)
+        time.sleep(2)  # 팝업이 뜰 시간 확보
+        print('[로또 구매] ✅ 구매 버튼 클릭 완료')
 
         # 구매한도 팝업 확인 (구매 버튼 클릭 후)
+        print('[로또 구매] 구매한도 팝업 확인 중...')
         limit_message = self._check_purchase_limit_popup()
         if limit_message:
+          print(f'[로또 구매] ❌ 구매한도 초과: {limit_message}')
           # 팝업 닫기
           try:
             close_button = self.driver.find_element(By.XPATH, '//div[@id="recommend720Plus"]//a[contains(@href, "closeRecomd720Popup")]')
             close_button.click()
             time.sleep(1)
+            print('[로또 구매] 구매한도 팝업 닫기 완료')
           except:
             pass
           raise Exception(f'구매한도 초과: {limit_message}')
 
         # 구매 확인 누름
-        self.driver.execute_script('closepopupLayerConfirm(true)')
-        time.sleep(1)
+        print('[로또 구매] 구매 확인 팝업 처리...')
+        try:
+          self.driver.execute_script('closepopupLayerConfirm(true)')
+          time.sleep(2)  # 구매 처리 시간 확보
+          print('[로또 구매] ✅ 구매 확인 완료')
+        except Exception as e:
+          print(f'[로또 구매] ⚠️ 구매 확인 스크립트 실행 실패: {e}')
 
         # 구매한도 팝업 다시 확인 (구매 확인 후)
+        print('[로또 구매] 구매 확인 후 구매한도 팝업 재확인...')
         limit_message = self._check_purchase_limit_popup()
         if limit_message:
+          print(f'[로또 구매] ❌ 구매 확인 후 구매한도 초과: {limit_message}')
           # 팝업 닫기
           try:
             close_button = self.driver.find_element(By.XPATH, '//div[@id="recommend720Plus"]//a[contains(@href, "closeRecomd720Popup")]')
@@ -203,44 +227,55 @@ class DhLottery:
           raise Exception(f'구매한도 초과: {limit_message}')
 
         # 구매 결과 확인
+        print('[로또 구매] 구매 결과 확인 중...')
         report_row = self.driver.find_element(By.ID, 'reportRow')
         WebDriverWait(self.driver, 10)\
           .until(lambda driver: len(report_row.find_elements(By.XPATH, './li')) > 0)
 
         report_count = len(report_row.find_elements(By.XPATH, './li'))
+        print(f'[로또 구매] 구매 결과: {report_count}매 구매됨 (요청: {count}매)')
         if count != report_count:
+          print(f'[로또 구매] ❌ 구매 수량 불일치')
           raise Exception(f'로또 구매 실패 {count - report_count}건 있음')
+        
+        print(f'[로또 구매] ✅ 구매 성공: {count}매')
+      else:
+        print('[로또 구매] ✅ dryrun 모드 완료')
 
       return f'로또 구매완료: {count}매'
     except Exception as e:
-      print('로또 구매실패:', e)
+      print(f'[로또 구매] ❌ 구매 실패: {e}')
       traceback.print_exc()
       return f'로또 구매실패: {e}'
 
   # 연금복권 720+
   def buyLp72(self, count: int, dryrun: bool) -> str:
     try:
+      print(f'[연금복권 구매] {count}매 구매 시작 (dryrun={dryrun})...')
       self.driver.get('https://el.dhlottery.co.kr/game/TotalGame.jsp?LottoId=LP72')
+      print('[연금복권 구매] 페이지 로드 완료')
 
       iframe = self.driver.find_element(By.TAG_NAME, 'iframe')
       self.driver.switch_to.frame(iframe)
+      print('[연금복권 구매] iframe 전환 완료')
 
       if count == 5:
-        # # 같은조 5매 선택
-        # jo_button = self.driver.find_element(By.XPATH, f'//span[@class="notranslate lotto720_box jogroup all"]')
-        # jo_button.click()
-
+        print('[연금복권 구매] 같은조 5매 선택 모드...')
         # 자동 번호 선택
         auto_button = self.driver.find_element(By.CLASS_NAME, 'lotto720_btn_auto_number')
         auto_button.click()
+        print('[연금복권 구매] ✅ 자동 번호 선택 완료')
 
         # 구매 등록
         confirm_button = self.driver.find_element(By.CLASS_NAME, 'lotto720_btn_confirm_number')
         confirm_button.click()
+        print('[연금복권 구매] ✅ 구매 등록 완료')
       else:
+        print(f'[연금복권 구매] {count}매 선택 모드...')
         for i in range(count):
           # 랜덤으로 조 선택
           jo = randint(1, 5)
+          print(f'[연금복권 구매] {i+1}/{count} - {jo}조 선택...')
           jo_button = self.driver.find_element(By.XPATH, f'//span[@class="notranslate lotto720_box jogroup num{jo}"]')
           jo_button.click()
 
@@ -251,30 +286,61 @@ class DhLottery:
           # 구매 등록
           confirm_button = self.driver.find_element(By.CLASS_NAME, 'lotto720_btn_confirm_number')
           confirm_button.click()
+          print(f'[연금복권 구매] ✅ {i+1}/{count} 등록 완료')
 
       # 구매 버튼
+      print('[연금복권 구매] 구매 버튼 클릭...')
       buy1_button = self.driver.find_element(By.CLASS_NAME, 'lotto720_btn_pay')
       buy1_button.click()
+      time.sleep(1)
+      print('[연금복권 구매] ✅ 구매 버튼 클릭 완료')
 
+      print('[연금복권 구매] Alert 확인...')
       Alert(self.driver).accept()
+      time.sleep(1)
+      print('[연금복권 구매] ✅ Alert 확인 완료')
 
       if not dryrun:
+        print('[연금복권 구매] 실제 구매 진행...')
         # 구매 버튼이 하나 더 있음
+        print('[연금복권 구매] 최종 구매 확인 버튼 클릭...')
         buy2_button = self.driver.find_element(By.XPATH, '//div[@id="lotto720_popup_confirm"]/div/div[@class="lotto720_popup_bottom_wrapper btn_area"]/a')
         WebDriverWait(self.driver, 10).until(EC.visibility_of(buy2_button))
         buy2_button.click()
+        time.sleep(2)  # 구매 처리 시간 확보
+        print('[연금복권 구매] ✅ 최종 구매 확인 완료')
 
-        # 구매 결과
+        # 구매한도 팝업 확인
+        print('[연금복권 구매] 구매한도 팝업 확인 중...')
+        limit_message = self._check_purchase_limit_popup()
+        if limit_message:
+          print(f'[연금복권 구매] ❌ 구매한도 초과: {limit_message}')
+          # 팝업 닫기
+          try:
+            close_button = self.driver.find_element(By.XPATH, '//div[@id="recommend720Plus"]//a[contains(@href, "closeRecomd720Popup")]')
+            close_button.click()
+            time.sleep(1)
+          except:
+            pass
+          raise Exception(f'구매한도 초과: {limit_message}')
 
+        # 구매 결과 확인
+        print('[연금복권 구매] 구매 결과 확인 중...')
         sale_span = self.driver.find_element(By.CLASS_NAME, 'saleCnt')
         WebDriverWait(self.driver, 10).until(EC.visibility_of(sale_span))
         sale_count = int(sale_span.text)
+        print(f'[연금복권 구매] 구매 결과: {sale_count}매 구매됨 (요청: {count}매)')
         if sale_count != count:
+          print(f'[연금복권 구매] ❌ 구매 수량 불일치')
           raise Exception(f'연금복권 구매 실패 {count - sale_count}건 있음')
+        
+        print(f'[연금복권 구매] ✅ 구매 성공: {count}매')
+      else:
+        print('[연금복권 구매] ✅ dryrun 모드 완료')
 
       return f'연금복권 구매완료: {count}매'
     except Exception as e:
-      print('연금복권 구매실패:', e)
+      print(f'[연금복권 구매] ❌ 구매 실패: {e}')
       traceback.print_exc()
       return f'연금복권 구매실패: {e}'
 
