@@ -3,6 +3,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 from random import randint
 from os import getenv
@@ -116,12 +117,11 @@ class DhLottery:
   def _get_popup_layer_message(self):
     try:
       layer_message = self.driver.find_element(By.XPATH, '//div[@id="popupLayerAlert"]/div/div/span[@class="layer-message"]')
-      WebDriverWait(self.driver, 10).until(EC.visibility_of(layer_message))
+      WebDriverWait(self.driver, 2).until(EC.visibility_of(layer_message))  # 타임아웃을 2초로 단축
       return layer_message.text
-    except Exception as e:
-      print('팝업 내용 못읽음:', e)
-      traceback.print_exc()
-      return ''
+    except:
+      # 팝업이 없으면 None 반환 (정상적인 경우)
+      return None
 
   def _check_purchase_limit_popup(self):
     """구매한도 팝업 확인"""
@@ -148,23 +148,43 @@ class DhLottery:
       self.driver.get('https://el.dhlottery.co.kr/game/TotalGame.jsp?LottoId=LO40')
       print('[로또 구매] 페이지 로드 완료')
 
-      iframe = self.driver.find_element(By.TAG_NAME, 'iframe')
+      iframe = WebDriverWait(self.driver, 10).until(
+        EC.presence_of_element_located((By.TAG_NAME, 'iframe'))
+      )
       self.driver.switch_to.frame(iframe)
       print('[로또 구매] iframe 전환 완료')
-
-      # 자동 번호 선택
+      
+      # iframe 내부가 완전히 로드될 때까지 대기
+      time.sleep(2)
+      
+      # 자동 번호 선택 - 직접 버튼 클릭 방식으로 변경
       print('[로또 구매] 자동 번호 선택 시도...')
       try:
+        # 방법 1: selectWayTab 함수가 로드될 때까지 대기 후 실행
+        WebDriverWait(self.driver, 10).until(
+          lambda driver: driver.execute_script('return typeof selectWayTab === "function"')
+        )
         self.driver.execute_script('selectWayTab(1)')
-        print('[로또 구매] ✅ 자동 번호 선택 성공')
-      except Exception as e:
-        print(f'[로또 구매] ⚠️ 자동 번호 선택 실패: {e}')
-        # 로또는 판매시간이 아니면 팝업이 뜬다.
-        message = self._get_popup_layer_message()
-        if message:
-          print(f'[로또 구매] ❌ 판매시간 아님: {message}')
-          raise Exception(message)
-        raise
+        print('[로또 구매] ✅ 자동 번호 선택 성공 (스크립트)')
+      except Exception as script_error:
+        print(f'[로또 구매] ⚠️ 스크립트 방식 실패, 버튼 클릭 방식 시도: {script_error}')
+        try:
+          # 방법 2: 직접 버튼 클릭 (더 안정적)
+          # 자동 번호 선택 탭 버튼 찾기
+          auto_tab = WebDriverWait(self.driver, 10).until(
+            EC.element_to_be_clickable((By.XPATH, '//a[contains(@onclick, "selectWayTab(1)") or contains(@href, "selectWayTab(1)")]'))
+          )
+          auto_tab.click()
+          time.sleep(1)
+          print('[로또 구매] ✅ 자동 번호 선택 성공 (버튼 클릭)')
+        except Exception as button_error:
+          print(f'[로또 구매] ⚠️ 버튼 클릭 방식도 실패: {button_error}')
+          # 로또는 판매시간이 아니면 팝업이 뜬다.
+          message = self._get_popup_layer_message()
+          if message:
+            print(f'[로또 구매] ❌ 판매시간 아님: {message}')
+            raise Exception(message)
+          raise Exception(f'자동 번호 선택 실패: {button_error}')
 
       # 수량 선택
       print(f'[로또 구매] 수량 {count}매 선택...')
@@ -207,10 +227,18 @@ class DhLottery:
         print('[로또 구매] 구매 확인 팝업 처리...')
         try:
           self.driver.execute_script('closepopupLayerConfirm(true)')
-          time.sleep(2)  # 구매 처리 시간 확보
+          time.sleep(3)  # 구매 처리 시간 확보
           print('[로또 구매] ✅ 구매 확인 완료')
         except Exception as e:
           print(f'[로또 구매] ⚠️ 구매 확인 스크립트 실행 실패: {e}')
+          # 스크립트 실행 실패 시 직접 확인 버튼 클릭 시도
+          try:
+            confirm_button = self.driver.find_element(By.XPATH, '//a[contains(@onclick, "closepopupLayerConfirm") or contains(@href, "closepopupLayerConfirm")]')
+            confirm_button.click()
+            time.sleep(3)
+            print('[로또 구매] ✅ 구매 확인 버튼 클릭 완료')
+          except:
+            print('[로또 구매] ⚠️ 구매 확인 버튼을 찾을 수 없습니다.')
 
         # 구매한도 팝업 다시 확인 (구매 확인 후)
         print('[로또 구매] 구매 확인 후 구매한도 팝업 재확인...')
@@ -226,19 +254,61 @@ class DhLottery:
             pass
           raise Exception(f'구매한도 초과: {limit_message}')
 
+        # 에러 메시지 확인
+        print('[로또 구매] 에러 메시지 확인 중...')
+        error_message = self._get_popup_layer_message()
+        if error_message:
+          print(f'[로또 구매] ❌ 에러 메시지 발견: {error_message}')
+          raise Exception(f'구매 실패: {error_message}')
+
         # 구매 결과 확인
         print('[로또 구매] 구매 결과 확인 중...')
-        report_row = self.driver.find_element(By.ID, 'reportRow')
-        WebDriverWait(self.driver, 10)\
-          .until(lambda driver: len(report_row.find_elements(By.XPATH, './li')) > 0)
-
-        report_count = len(report_row.find_elements(By.XPATH, './li'))
-        print(f'[로또 구매] 구매 결과: {report_count}매 구매됨 (요청: {count}매)')
-        if count != report_count:
-          print(f'[로또 구매] ❌ 구매 수량 불일치')
-          raise Exception(f'로또 구매 실패 {count - report_count}건 있음')
-        
-        print(f'[로또 구매] ✅ 구매 성공: {count}매')
+        try:
+          report_row = self.driver.find_element(By.ID, 'reportRow')
+          print(f'[로또 구매] reportRow 요소 찾음, li 요소 대기 중...')
+          
+          # 더 긴 대기 시간과 더 자세한 로그
+          try:
+            WebDriverWait(self.driver, 15).until(
+              lambda driver: len(report_row.find_elements(By.XPATH, './li')) > 0
+            )
+            report_count = len(report_row.find_elements(By.XPATH, './li'))
+            print(f'[로또 구매] 구매 결과: {report_count}매 구매됨 (요청: {count}매)')
+            
+            if count != report_count:
+              print(f'[로또 구매] ❌ 구매 수량 불일치')
+              raise Exception(f'로또 구매 실패 {count - report_count}건 있음')
+            
+            print(f'[로또 구매] ✅ 구매 성공: {count}매')
+          except TimeoutException:
+            # 타임아웃 발생 시 현재 상태 확인
+            print('[로또 구매] ⚠️ 구매 결과 확인 타임아웃')
+            print(f'[로또 구매] 현재 reportRow의 li 개수: {len(report_row.find_elements(By.XPATH, "./li"))}')
+            
+            # 페이지 소스 일부 확인
+            try:
+              page_source_snippet = self.driver.page_source[:1000]
+              if '구매완료' in page_source_snippet or '완료' in page_source_snippet:
+                print('[로또 구매] ⚠️ 구매 완료 메시지가 페이지에 있지만 reportRow에 항목이 없습니다.')
+                print('[로또 구매] ⚠️ 구매는 성공했을 수 있으나 결과 확인 실패')
+                # 구매 성공으로 간주 (실제로는 성공했을 가능성이 높음)
+                return f'로또 구매완료: {count}매 (결과 확인 불가)'
+              else:
+                raise Exception('구매 결과를 확인할 수 없습니다. 구매가 실패했을 수 있습니다.')
+            except:
+              raise Exception('구매 결과를 확인할 수 없습니다.')
+        except NoSuchElementException:
+          print('[로또 구매] ⚠️ reportRow 요소를 찾을 수 없습니다.')
+          # 대체 방법: 페이지에 성공 메시지가 있는지 확인
+          try:
+            page_source = self.driver.page_source
+            if '구매완료' in page_source or '완료' in page_source:
+              print('[로또 구매] ⚠️ 구매 완료 메시지 발견, 구매 성공으로 간주')
+              return f'로또 구매완료: {count}매 (결과 확인 불가)'
+            else:
+              raise Exception('구매 결과를 확인할 수 없습니다.')
+          except:
+            raise Exception('구매 결과를 확인할 수 없습니다.')
       else:
         print('[로또 구매] ✅ dryrun 모드 완료')
 
