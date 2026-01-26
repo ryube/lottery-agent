@@ -19,6 +19,54 @@ class DhLottery:
     self.driver = driver
     self.dryrun = getenv('LTA_DRYRUN') == '1'
 
+  def _wait_for_overlay_to_disappear(self, timeout=10):
+    """pause_bg 등 오버레이가 사라질 때까지 대기"""
+    try:
+      # 오버레이가 존재하면 사라질 때까지 대기
+      WebDriverWait(self.driver, timeout).until(
+        EC.invisibility_of_element_located((By.CSS_SELECTOR, 'div.pause_bg'))
+      )
+      print('[대기] ✅ 오버레이 사라짐 확인')
+    except TimeoutException:
+      print('[대기] ⚠️ 오버레이 대기 타임아웃 - 계속 진행')
+    except:
+      pass  # 오버레이가 없으면 무시
+
+  def _safe_click(self, element, element_name="버튼", max_retries=3):
+    """오버레이를 피해 안전하게 클릭 (재시도 포함)"""
+    for attempt in range(max_retries):
+      try:
+        # 1. 오버레이 사라질 때까지 대기
+        self._wait_for_overlay_to_disappear()
+
+        # 2. 요소가 클릭 가능할 때까지 대기
+        WebDriverWait(self.driver, 10).until(
+          EC.element_to_be_clickable(element)
+        )
+
+        # 3. 일반 클릭 시도
+        element.click()
+        print(f'[클릭] ✅ {element_name} 클릭 성공')
+        return True
+      except Exception as e:
+        print(f'[클릭] ⚠️ {element_name} 클릭 시도 {attempt + 1}/{max_retries} 실패: {str(e)[:80]}')
+
+        if attempt < max_retries - 1:
+          # 재시도 전 추가 대기
+          time.sleep(1)
+          self._wait_for_overlay_to_disappear(timeout=5)
+
+          # JavaScript 클릭 시도
+          try:
+            self.driver.execute_script("arguments[0].click();", element)
+            print(f'[클릭] ✅ {element_name} JavaScript 클릭 성공')
+            return True
+          except Exception as js_e:
+            print(f'[클릭] ⚠️ JavaScript 클릭도 실패: {str(js_e)[:50]}')
+            time.sleep(1)
+        else:
+          raise Exception(f'{element_name} 클릭 실패: {e}')
+
   def login(self, userid: str, password: str):
     # 로그인 화면
     self.driver.get('https://dhlottery.co.kr/login')
@@ -220,19 +268,19 @@ class DhLottery:
       count_dropdown.select_by_value(str(count))
       print('[로또 구매] ✅ 수량 선택 완료')
 
-      # 수량 확인 버튼
+      # 수량 확인 버튼 (오버레이 대기 후 안전하게 클릭)
       print('[로또 구매] 수량 확인 버튼 클릭...')
       select_num_button = self.driver.find_element(By.ID, 'btnSelectNum')
-      select_num_button.click()
+      self._safe_click(select_num_button, '수량 확인 버튼')
       time.sleep(1)
       print('[로또 구매] ✅ 수량 확인 완료')
 
       if not dryrun:
         print('[로또 구매] 실제 구매 진행...')
-        # 구매 버튼 누름
+        # 구매 버튼 누름 (오버레이 대기 후 안전하게 클릭)
         print('[로또 구매] 구매 버튼 클릭...')
         buy_button = self.driver.find_element(By.NAME, 'btnBuy')
-        buy_button.click()
+        self._safe_click(buy_button, '구매 버튼')
         time.sleep(2)  # 팝업이 뜰 시간 확보
         print('[로또 구매] ✅ 구매 버튼 클릭 완료')
 
