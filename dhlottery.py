@@ -11,13 +11,42 @@ import traceback
 import time
 import re
 
+
+class LotteryError(Exception):
+  """로또 구매/확인 중 발생하는 에러 (스크린샷 포함)"""
+  def __init__(self, message: str, screenshot: bytes = None):
+    super().__init__(message)
+    self.screenshot = screenshot
+
+
 class DhLottery:
   driver: WebDriver
   dryrun: bool
+  last_screenshot: bytes = None  # 마지막 에러 스크린샷
 
   def __init__(self, driver: WebDriver):
     self.driver = driver
     self.dryrun = getenv('LTA_DRYRUN') == '1'
+    self.last_screenshot = None
+
+  def _capture_error_screenshot(self) -> bytes:
+    """에러 발생 시 스크린샷 캡처 (iframe에서 벗어나서)"""
+    try:
+      self.driver.switch_to.default_content()
+    except:
+      pass
+    try:
+      return self.driver.get_screenshot_as_png()
+    except:
+      return None
+
+  def _handle_error(self, operation: str, error: Exception):
+    """통합 에러 처리: 로그 + 스크린샷 + LotteryError 발생"""
+    print(f'[{operation}] ❌ 실패: {error}')
+    traceback.print_exc()
+    screenshot = self._capture_error_screenshot()
+    self.last_screenshot = screenshot
+    raise LotteryError(f'{operation} 실패: {error}', screenshot)
 
   def _wait_for_overlay_to_disappear(self, timeout=10):
     """pause_bg 등 오버레이가 사라질 때까지 대기"""
@@ -389,10 +418,10 @@ class DhLottery:
         print('[로또 구매] ✅ dryrun 모드 완료')
 
       return f'로또 구매완료: {count}매'
+    except LotteryError:
+      raise  # 이미 처리된 에러는 그대로 전달
     except Exception as e:
-      print(f'[로또 구매] ❌ 구매 실패: {e}')
-      traceback.print_exc()
-      return f'로또 구매실패: {e}'
+      self._handle_error('로또 구매', e)
 
   # 연금복권 720+
   def buyLp72(self, count: int, dryrun: bool) -> str:
@@ -485,10 +514,10 @@ class DhLottery:
         print('[연금복권 구매] ✅ dryrun 모드 완료')
 
       return f'연금복권 구매완료: {count}매'
+    except LotteryError:
+      raise
     except Exception as e:
-      print(f'[연금복권 구매] ❌ 구매 실패: {e}')
-      traceback.print_exc()
-      return f'연금복권 구매실패: {e}'
+      self._handle_error('연금복권 구매', e)
 
   def _code_to_name(self, code: str):
     dict = {
@@ -525,14 +554,12 @@ class DhLottery:
       
       # 1. 최근 1주일 버튼 클릭
       print('[당첨 확인] 최근 1주일 버튼 클릭 시도...')
-      week_button_clicked = False
       try:
         week_button = WebDriverWait(self.driver, 10).until(
           EC.element_to_be_clickable((By.XPATH, '//button[contains(@onclick, "fn_chgDt") and contains(@onclick, "\'2\'")]'))
         )
         week_button.click()
         time.sleep(1)
-        week_button_clicked = True
         print('[당첨 확인] ✅ 최근 1주일 버튼 클릭 성공')
       except:
         # 다른 방법으로 시도
@@ -540,7 +567,6 @@ class DhLottery:
           week_button = self.driver.find_element(By.XPATH, '//button[contains(text(), "최근 1주일")]')
           week_button.click()
           time.sleep(1)
-          week_button_clicked = True
           print('[당첨 확인] ✅ 최근 1주일 버튼 클릭 성공 (대체 방법)')
         except:
           print('[당첨 확인] ⚠️ 최근 1주일 버튼을 찾을 수 없음 (계속 진행)')
@@ -670,7 +696,7 @@ class DhLottery:
       print(f'[당첨 확인] ✅ {len(winning_items)}개 당첨 항목 발견!')
       return '\n'.join(messages)
 
+    except LotteryError:
+      raise
     except Exception as e:
-      print(f'[당첨 확인] ❌ 오류 발생: {e}')
-      traceback.print_exc()
-      return f'당첨 확인 실패: {e}'
+      self._handle_error('당첨 확인', e)

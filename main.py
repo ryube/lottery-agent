@@ -2,7 +2,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.webdriver import WebDriver
 from selenium.webdriver.chrome.options import Options
 from argparse import ArgumentParser, Namespace
-from dhlottery import DhLottery
+from dhlottery import DhLottery, LotteryError
 from message import Message
 from os import getenv
 from time import sleep
@@ -99,22 +99,42 @@ def do_lottery(args: Namespace, driver: WebDriver, message: Message):
 
     message.add(f'실행전 잔고: {dhlottery.getBalance()}')
 
+    has_failure = False
     if args.lo40_count > 0:
-      message.add(dhlottery.buyLo40(args.lo40_count, args.dryrun))
+      try:
+        result = dhlottery.buyLo40(args.lo40_count, args.dryrun)
+        message.add(result)
+      except LotteryError as e:
+        has_failure = True
+        message.add(str(e))
+        if e.screenshot:
+          message.add_image(e.screenshot)
+
     if args.lp72_count > 0:
-      message.add(dhlottery.buyLp72(args.lp72_count, args.dryrun))
-    
+      try:
+        result = dhlottery.buyLp72(args.lp72_count, args.dryrun)
+        message.add(result)
+      except LotteryError as e:
+        has_failure = True
+        message.add(str(e))
+        if e.screenshot:
+          message.add_image(e.screenshot)
+
     # headless를 안 쓰는 건 개발할 때 화면을 보기 위해서다.
     # 잔고를 조회하면 화면이 넘어가버려서 디버깅하기 어려워진다.
-    if args.headless:
+    if args.headless and not has_failure:
       message.add(f'실행후 잔고: {dhlottery.getBalance()}')
   elif args.command == 'check':
-    message.add(dhlottery.check(args.lottery.upper()))
-    
-    # headless를 안 쓰는 건 개발할 때 화면을 보기 위해서다.
-    # 잔고를 조회하면 화면이 넘어가버려서 디버깅하기 어려워진다.
-    if args.headless:
-      message.add(f'잔고: {dhlottery.getBalance()}')
+    try:
+      message.add(dhlottery.check(args.lottery.upper()))
+      # headless를 안 쓰는 건 개발할 때 화면을 보기 위해서다.
+      # 잔고를 조회하면 화면이 넘어가버려서 디버깅하기 어려워진다.
+      if args.headless:
+        message.add(f'잔고: {dhlottery.getBalance()}')
+    except LotteryError as e:
+      message.add(str(e))
+      if e.screenshot:
+        message.add_image(e.screenshot)
   else:
     raise Exception(f'not implemented command: {args.command}')
 
