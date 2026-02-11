@@ -48,6 +48,40 @@ class DhLottery:
     self.last_screenshot = screenshot
     raise LotteryError(f'{operation} 실패: {error}', screenshot)
 
+  def _safe_get(self, url, max_retries=3, page_load_timeout=60):
+    """페이지 로드 타임아웃 처리 및 재시도"""
+    original_timeout = None
+    try:
+      original_timeout = self.driver.timeouts.page_load
+    except:
+      pass
+
+    self.driver.set_page_load_timeout(page_load_timeout)
+
+    for attempt in range(max_retries):
+      try:
+        self.driver.get(url)
+        return
+      except TimeoutException:
+        print(f'[페이지 로드] ⚠️ 타임아웃 (시도 {attempt + 1}/{max_retries})')
+        if attempt < max_retries - 1:
+          # 현재 페이지에서라도 진행 가능한지 확인
+          try:
+            if self.driver.current_url and 'dhlottery' in self.driver.current_url:
+              print('[페이지 로드] 부분 로드 상태로 계속 진행 시도')
+              return
+          except:
+            pass
+          time.sleep(3)
+        else:
+          raise
+
+    if original_timeout is not None:
+      try:
+        self.driver.set_page_load_timeout(original_timeout)
+      except:
+        pass
+
   def _wait_for_overlay_to_disappear(self, timeout=10):
     """pause_bg 등 오버레이가 사라질 때까지 대기"""
     try:
@@ -383,7 +417,7 @@ class DhLottery:
   def buyLo40(self, count: int, dryrun: bool) -> str:
     try:
       print(f'[로또 구매] {count}매 구매 시작 (dryrun={dryrun})...')
-      self.driver.get('https://el.dhlottery.co.kr/game/TotalGame.jsp?LottoId=LO40')
+      self._safe_get('https://el.dhlottery.co.kr/game/TotalGame.jsp?LottoId=LO40')
       print('[로또 구매] 페이지 로드 완료')
 
       iframe = WebDriverWait(self.driver, 15).until(
@@ -543,7 +577,7 @@ class DhLottery:
   def buyLp72(self, count: int, dryrun: bool) -> str:
     try:
       print(f'[연금복권 구매] {count}매 구매 시작 (dryrun={dryrun})...')
-      self.driver.get('https://el.dhlottery.co.kr/game/TotalGame.jsp?LottoId=LP72')
+      self._safe_get('https://el.dhlottery.co.kr/game/TotalGame.jsp?LottoId=LP72')
       print('[연금복권 구매] 페이지 로드 완료')
 
       iframe = self.driver.find_element(By.TAG_NAME, 'iframe')

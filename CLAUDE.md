@@ -57,4 +57,18 @@ uv run python test_all_functions.py
    - JS querySelector로 auto 관련 요소 탐색
 3. `_dump_page_state()` 추가 - 실패 시 페이지 소스, 요소 존재 여부, JS 함수 존재 여부 덤프
 
-**상태**: 테스트 필요 - 실제 사이트 접속하여 대기열 통과 후 게임 요소 셀렉터 확인 필요
+**상태**: 로컬 테스트 통과 (headless/non-headless 모두)
+
+### 2025-02-10: 페이지 로드 타임아웃 수정
+**문제**: Docker 환경에서 `driver.get()` 호출 시 120초 타임아웃 발생
+- "Timed out receiving message from renderer: 119.693"
+- Chrome 144, Docker 컨테이너 내 Chromium
+
+**원인**: Docker 환경에서 네트워크/리소스 제약으로 `el.dhlottery.co.kr` 페이지가 기본 타임아웃 내 로드 실패
+
+**수정 내용**:
+1. `_safe_get()` 메서드 추가 - page_load_timeout 설정 + 최대 3회 재시도
+2. 부분 로드 상태에서도 진행 가능하면 계속 진행
+3. `buyLo40()`, `buyLp72()` 모두 `_safe_get()` 사용으로 변경
+
+**상태**: 로컬 헤드리스 테스트 통과, Docker 환경 테스트 필요
