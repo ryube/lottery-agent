@@ -61,6 +61,167 @@ class DhLottery:
     except:
       pass  # 오버레이가 없으면 무시
 
+  def _wait_for_game_ready(self, timeout=60):
+    """대기열 완료 후 실제 게임 페이지가 로드될 때까지 대기"""
+    print(f'[대기열] 게임 페이지 로딩 대기 (최대 {timeout}초)...')
+    start = time.time()
+
+    # 대기열 UI가 있으면 실제 게임이 표시될 때까지 대기
+    try:
+      # showRealPage 함수가 호출되어 대기열이 끝나면 게임 요소가 나타남
+      # amoundApply(수량 드롭다운)이 보이면 게임 페이지가 준비된 것
+      WebDriverWait(self.driver, timeout).until(
+        lambda d: d.find_elements(By.ID, 'amoundApply') or
+                  d.find_elements(By.ID, 'btnSelectNum') or
+                  d.execute_script('return typeof selectWayTab === "function"')
+      )
+      elapsed = round(time.time() - start, 1)
+      print(f'[대기열] ✅ 게임 페이지 준비 완료 ({elapsed}초 소요)')
+    except TimeoutException:
+      elapsed = round(time.time() - start, 1)
+      print(f'[대기열] ⚠️ {elapsed}초 대기 후에도 게임 요소를 찾지 못함')
+      # 현재 페이지 상태 덤프
+      self._dump_page_state()
+      raise Exception(f'게임 페이지 로딩 타임아웃 ({elapsed}초). 대기열이 해소되지 않았거나 페이지 구조가 변경되었습니다.')
+
+    time.sleep(1)  # 추가 안정화 대기
+
+  def _select_auto_number(self):
+    """자동 번호 선택 (여러 방법 시도)"""
+    methods = [
+      self._select_auto_method_script,
+      self._select_auto_method_onclick,
+      self._select_auto_method_tab,
+      self._select_auto_method_text,
+      self._select_auto_method_js_click,
+    ]
+
+    for i, method in enumerate(methods, 1):
+      try:
+        method(i)
+        return  # 성공하면 바로 리턴
+      except Exception as e:
+        print(f'[로또 구매] ⚠️ 방법 {i} 실패: {str(e)[:120]}')
+
+    # 모든 방법 실패 - 페이지 상태 덤프 후 에러
+    print('[로또 구매] ❌ 모든 자동 번호 선택 방법 실패')
+    self._dump_page_state()
+    raise Exception('자동 번호 선택을 할 수 없습니다. 페이지 구조가 변경되었을 수 있습니다.')
+
+  def _select_auto_method_script(self, num):
+    """방법 1: selectWayTab JavaScript 함수 호출"""
+    print(f'[로또 구매] 방법 {num}: selectWayTab 함수 호출...')
+    WebDriverWait(self.driver, 5).until(
+      lambda d: d.execute_script('return typeof selectWayTab === "function"')
+    )
+    self.driver.execute_script('selectWayTab(1)')
+    time.sleep(1)
+    print(f'[로또 구매] ✅ 자동 번호 선택 성공 (selectWayTab)')
+
+  def _select_auto_method_onclick(self, num):
+    """방법 2: onclick 속성으로 버튼 찾기"""
+    print(f'[로또 구매] 방법 {num}: onclick 버튼 클릭...')
+    auto_tab = WebDriverWait(self.driver, 5).until(
+      EC.element_to_be_clickable((By.XPATH, '//a[contains(@onclick, "selectWayTab(1)")]'))
+    )
+    auto_tab.click()
+    time.sleep(1)
+    print(f'[로또 구매] ✅ 자동 번호 선택 성공 (onclick)')
+
+  def _select_auto_method_tab(self, num):
+    """방법 3: ID/class로 자동 탭 찾기"""
+    print(f'[로또 구매] 방법 {num}: 탭 요소 찾기...')
+    xpaths = [
+      '//div[@id="check2" or contains(@class, "select_auto")]//a',
+      '//li[@id="check2"]//a',
+      '//input[@id="check2"]',
+      '//*[@id="selway1"]',
+    ]
+    for xpath in xpaths:
+      try:
+        el = self.driver.find_element(By.XPATH, xpath)
+        el.click()
+        time.sleep(1)
+        print(f'[로또 구매] ✅ 자동 번호 선택 성공 (탭: {xpath})')
+        return
+      except:
+        continue
+    raise Exception('탭 요소를 찾을 수 없음')
+
+  def _select_auto_method_text(self, num):
+    """방법 4: 텍스트 내용으로 자동 버튼 찾기"""
+    print(f'[로또 구매] 방법 {num}: 텍스트 검색...')
+    xpaths = [
+      '//a[contains(text(), "자동")]',
+      '//span[contains(text(), "자동")]/ancestor::a',
+      '//label[contains(text(), "자동")]',
+      '//input[@value="자동" or @title="자동"]',
+      '//*[contains(text(), "자동번호")]',
+    ]
+    for xpath in xpaths:
+      try:
+        el = self.driver.find_element(By.XPATH, xpath)
+        el.click()
+        time.sleep(1)
+        print(f'[로또 구매] ✅ 자동 번호 선택 성공 (텍스트: {xpath})')
+        return
+      except:
+        continue
+    raise Exception('자동 텍스트 요소를 찾을 수 없음')
+
+  def _select_auto_method_js_click(self, num):
+    """방법 5: 페이지 내 자동 선택 관련 함수를 JS로 직접 탐색/실행"""
+    print(f'[로또 구매] 방법 {num}: JavaScript 탐색...')
+    # 페이지에 있는 자동 선택 관련 함수 목록 확인
+    js_attempts = [
+      'selectWayTab(1)',
+      'document.querySelector(\'[id*="auto"]\') && document.querySelector(\'[id*="auto"]\').click()',
+      'document.querySelector(\'[class*="auto"]\') && document.querySelector(\'[class*="auto"]\').click()',
+      'document.querySelector(\'input[name="selway"][value="1"]\') && document.querySelector(\'input[name="selway"][value="1"]\').click()',
+    ]
+    for js in js_attempts:
+      try:
+        result = self.driver.execute_script(f'try {{ {js}; return true; }} catch(e) {{ return false; }}')
+        if result:
+          time.sleep(1)
+          print(f'[로또 구매] ✅ 자동 번호 선택 성공 (JS: {js[:50]})')
+          return
+      except:
+        continue
+    raise Exception('JavaScript 자동 선택 실패')
+
+  def _dump_page_state(self):
+    """디버깅용 페이지 상태 덤프"""
+    try:
+      page_source = self.driver.page_source
+      # 중요한 HTML 구조만 출력 (처음 3000자)
+      print('[디버그] === 페이지 소스 (앞부분) ===')
+      print(page_source[:3000])
+      print('[디버그] === 페이지 소스 끝 ===')
+
+      # 주요 요소 존재 여부 확인
+      checks = {
+        'amoundApply': By.ID,
+        'btnSelectNum': By.ID,
+        'btnBuy': By.NAME,
+        'reportRow': By.ID,
+        'popupLayerAlert': By.ID,
+      }
+      for name, by in checks.items():
+        found = len(self.driver.find_elements(by, name)) > 0
+        print(f'[디버그] {name}: {"있음" if found else "없음"}')
+
+      # JS 함수 존재 여부
+      js_funcs = ['selectWayTab', 'selectInitCall', 'showRealPage', 'closepopupLayerConfirm']
+      for func in js_funcs:
+        try:
+          exists = self.driver.execute_script(f'return typeof {func} === "function"')
+          print(f'[디버그] JS {func}: {"있음" if exists else "없음"}')
+        except:
+          print(f'[디버그] JS {func}: 확인 실패')
+    except Exception as e:
+      print(f'[디버그] 페이지 상태 덤프 실패: {e}')
+
   def _safe_click(self, element, element_name="버튼", max_retries=3):
     """오버레이를 피해 안전하게 클릭 (재시도 포함)"""
     for attempt in range(max_retries):
@@ -231,65 +392,20 @@ class DhLottery:
       self.driver.switch_to.frame(iframe)
       print('[로또 구매] iframe 전환 완료')
       
-      # iframe 내부가 완전히 로드될 때까지 대기 (더 긴 시간)
+      # iframe 내부가 완전히 로드될 때까지 대기
+      # 대기열 시스템이 있을 수 있으므로 실제 게임 요소가 나타날 때까지 대기
       print('[로또 구매] iframe 내부 로딩 대기 중...')
-      time.sleep(5)
-      
+      self._wait_for_game_ready(timeout=60)
+
       # 판매시간 확인 (팝업이 있으면 판매시간이 아님)
       message = self._get_popup_layer_message()
       if message:
         print(f'[로또 구매] ❌ 판매시간 아님: {message}')
         raise Exception(message)
-      
+
       # 자동 번호 선택
       print('[로또 구매] 자동 번호 선택 시도...')
-      auto_selected = False
-      
-      # 방법 1: selectWayTab 함수 사용
-      try:
-        print('[로또 구매] 방법 1: selectWayTab 함수 대기 중...')
-        WebDriverWait(self.driver, 15).until(
-          lambda driver: driver.execute_script('return typeof selectWayTab === "function"')
-        )
-        self.driver.execute_script('selectWayTab(1)')
-        time.sleep(1)
-        auto_selected = True
-        print('[로또 구매] ✅ 자동 번호 선택 성공 (스크립트)')
-      except Exception as e1:
-        print(f'[로또 구매] ⚠️ 방법 1 실패: {str(e1)[:100]}')
-      
-      # 방법 2: 버튼 직접 클릭 (onclick)
-      if not auto_selected:
-        try:
-          print('[로또 구매] 방법 2: 버튼 클릭 시도...')
-          auto_tab = WebDriverWait(self.driver, 10).until(
-            EC.element_to_be_clickable((By.XPATH, '//a[contains(@onclick, "selectWayTab(1)")]'))
-          )
-          auto_tab.click()
-          time.sleep(1)
-          auto_selected = True
-          print('[로또 구매] ✅ 자동 번호 선택 성공 (버튼 onclick)')
-        except Exception as e2:
-          print(f'[로또 구매] ⚠️ 방법 2 실패: {str(e2)[:100]}')
-      
-      # 방법 3: 자동 번호 선택 탭 찾기 (class나 id로)
-      if not auto_selected:
-        try:
-          print('[로또 구매] 방법 3: 자동 탭 찾기...')
-          # 수동/자동 탭에서 자동 탭 클릭
-          auto_tab = WebDriverWait(self.driver, 10).until(
-            EC.element_to_be_clickable((By.XPATH, '//div[@id="check2" or contains(@class, "select_auto")]//a'))
-          )
-          auto_tab.click()
-          time.sleep(1)
-          auto_selected = True
-          print('[로또 구매] ✅ 자동 번호 선택 성공 (탭 클릭)')
-        except Exception as e3:
-          print(f'[로또 구매] ⚠️ 방법 3 실패: {str(e3)[:100]}')
-      
-      if not auto_selected:
-        print('[로또 구매] ❌ 모든 자동 번호 선택 방법 실패')
-        raise Exception('자동 번호 선택을 할 수 없습니다. 페이지 구조가 변경되었을 수 있습니다.')
+      self._select_auto_number()
 
       # 수량 선택
       print(f'[로또 구매] 수량 {count}매 선택...')
