@@ -9,11 +9,18 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Check result
-        uses: ryube/lottery-check-action@v1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          username: ${{ secrets.DHL_USERID }}
-          password: ${{ secrets.DHL_PASSWORD }}
-          telegram-bot-token: ${{ secrets.TLG_BOTTOKEN }}
-          telegram-chatid: ${{ secrets.TLG_CHATID }}
-          lottery-code: lo40
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Check result
+        run: python main.py check lo40
+        env:
+          DHL_USERID: ${{ secrets.DHL_USERID }}
+          DHL_PASSWORD: ${{ secrets.DHL_PASSWORD }}
+          DHL_USERID_2: ${{ secrets.DHL_USERID_2 }}
+          DHL_PASSWORD_2: ${{ secrets.DHL_PASSWORD_2 }}
+          TLG_BOTTOKEN: ${{ secrets.TLG_BOTTOKEN }}
+          TLG_CHATID: ${{ secrets.TLG_CHATID }}

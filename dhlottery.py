@@ -1,852 +1,375 @@
-from selenium.webdriver.common.alert import Alert
-from selenium.webdriver.common.by import By
-from selenium.webdriver.remote.webdriver import WebDriver
-from selenium.webdriver.support.ui import WebDriverWait, Select
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+"""
+동행복권 비공식 API 클라이언트 (requests 기반)
 
-from random import randint
-from os import getenv
-import traceback
-import time
+https://github.com/roeniss/dhlottery-api 의 LotteryClient 를 참고해서 재작성했다.
+브라우저(Selenium) 없이 HTTP 요청만으로 로그인/잔고조회/로또 구매/당첨확인을 한다.
+"""
+import datetime
+import json
 import re
+import time
+from typing import Dict, List, Optional
+
+import requests
+from Crypto.Cipher import PKCS1_v1_5
+from Crypto.PublicKey import RSA
+
+KST = datetime.timezone(datetime.timedelta(hours=9))
+MAX_LO40_PER_BUY = 5
 
 
 class LotteryError(Exception):
-  """로또 구매/확인 중 발생하는 에러 (스크린샷 포함)"""
-  def __init__(self, message: str, screenshot: bytes = None):
-    super().__init__(message)
-    self.screenshot = screenshot
+  """로또 구매/확인 중 발생하는 에러"""
+
+
+def to_int(value) -> int:
+  """API 금액 필드를 정수로 (None, '5,000' 같은 값도 처리)"""
+  try:
+    return int(str(value).replace(',', '').strip() or 0) if value is not None else 0
+  except ValueError:
+    return 0
 
 
 class DhLottery:
-  driver: WebDriver
-  dryrun: bool
-  last_screenshot: bytes = None  # 마지막 에러 스크린샷
+  BASE_URL = 'https://www.dhlottery.co.kr'
+  OL_URL = 'https://ol.dhlottery.co.kr'
 
-  def __init__(self, driver: WebDriver):
-    self.driver = driver
-    self.dryrun = getenv('LTA_DRYRUN') == '1'
-    self.last_screenshot = None
+  LOGIN_PAGE = f'{BASE_URL}/login'
+  RSA_KEY_URL = f'{BASE_URL}/login/selectRsaModulus.do'
+  LOGIN_URL = f'{BASE_URL}/login/securityLoginCheck.do'
+  MYPAGE_URL = f'{BASE_URL}/mypage/home'
+  BALANCE_URL = f'{BASE_URL}/mypage/selectUserMndp.do'
+  LEDGER_PAGE = f'{BASE_URL}/mypage/mylotteryledger'
+  LEDGER_URL = f'{BASE_URL}/mypage/selectMyLotteryledger.do'
+  TICKET_DETAIL_URL = f'{BASE_URL}/mypage/lotto645TicketDetail.do'
 
-  def _capture_error_screenshot(self) -> bytes:
-    """에러 발생 시 스크린샷 캡처 (iframe에서 벗어나서)"""
-    try:
-      self.driver.switch_to.default_content()
-    except:
-      pass
-    try:
-      return self.driver.get_screenshot_as_png()
-    except:
-      return None
+  GAME645_PAGE = f'{OL_URL}/olotto/game/game645.do'
+  READY_SOCKET_URL = f'{OL_URL}/olotto/game/egovUserReadySocket.json'
+  BUY_LO40_URL = f'{OL_URL}/olotto/game/execBuy.do'
 
-  def _handle_error(self, operation: str, error: Exception):
-    """통합 에러 처리: 로그 + 스크린샷 + LotteryError 발생"""
-    print(f'[{operation}] ❌ 실패: {error}')
-    traceback.print_exc()
-    screenshot = self._capture_error_screenshot()
-    self.last_screenshot = screenshot
-    raise LotteryError(f'{operation} 실패: {error}', screenshot)
+  TIMEOUT = 15
+  BUY_TIMEOUT = (10, 60)  # 구매 요청은 응답이 늦어도 기다린다 (connect, read)
+  READY_MAX_WAIT = 120  # 접속 대기열 최대 대기 시간(초)
 
-  def _safe_get(self, url, max_retries=3, page_load_timeout=60):
-    """페이지 로드 타임아웃 처리 및 재시도"""
-    original_timeout = None
-    try:
-      original_timeout = self.driver.timeouts.page_load
-    except:
-      pass
+  def __init__(self, session: Optional[requests.Session] = None):
+    self.session = session or requests.Session()
+    # 사이트가 Linux/모바일 환경을 차단하므로 Windows Chrome 으로 위장한다.
+    self.session.headers.update({
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+      'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+      'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"Windows"',
+    })
+    self.userid = None
 
-    self.driver.set_page_load_timeout(page_load_timeout)
+  # ------------------------------------------------------------------ 공통
+  def _get(self, url: str, **kwargs) -> requests.Response:
+    kwargs.setdefault('timeout', self.TIMEOUT)
+    return self.session.get(url, **kwargs)
 
-    for attempt in range(max_retries):
-      try:
-        self.driver.get(url)
-        return
-      except TimeoutException:
-        print(f'[페이지 로드] ⚠️ 타임아웃 (시도 {attempt + 1}/{max_retries})')
-        if attempt < max_retries - 1:
-          # 현재 페이지에서라도 진행 가능한지 확인
-          try:
-            if self.driver.current_url and 'dhlottery' in self.driver.current_url:
-              print('[페이지 로드] 부분 로드 상태로 계속 진행 시도')
-              return
-          except:
-            pass
-          time.sleep(3)
-        else:
-          raise
+  def _post(self, url: str, **kwargs) -> requests.Response:
+    kwargs.setdefault('timeout', self.TIMEOUT)
+    return self.session.post(url, **kwargs)
 
-    if original_timeout is not None:
-      try:
-        self.driver.set_page_load_timeout(original_timeout)
-      except:
-        pass
+  def _json_headers(self, referer: str) -> Dict[str, str]:
+    return {
+      'Accept': 'application/json, text/javascript, */*; q=0.01',
+      'X-Requested-With': 'XMLHttpRequest',
+      'Referer': referer,
+    }
 
-  def _wait_for_overlay_to_disappear(self, timeout=10):
-    """pause_bg 등 오버레이가 사라질 때까지 대기"""
-    try:
-      # 오버레이가 존재하면 사라질 때까지 대기
-      WebDriverWait(self.driver, timeout).until(
-        EC.invisibility_of_element_located((By.CSS_SELECTOR, 'div.pause_bg'))
-      )
-      print('[대기] ✅ 오버레이 사라짐 확인')
-    except TimeoutException:
-      print('[대기] ⚠️ 오버레이 대기 타임아웃 - 계속 진행')
-    except:
-      pass  # 오버레이가 없으면 무시
+  @staticmethod
+  def _rsa_encrypt(plain_text: str, modulus_hex: str, exponent_hex: str) -> str:
+    key = RSA.construct((int(modulus_hex, 16), int(exponent_hex, 16)))
+    return PKCS1_v1_5.new(key).encrypt(plain_text.encode('utf-8')).hex()
 
-  def _wait_for_game_ready(self, timeout=60):
-    """대기열 완료 후 실제 게임 페이지가 로드될 때까지 대기"""
-    print(f'[대기열] 게임 페이지 로딩 대기 (최대 {timeout}초)...')
-    start = time.time()
-
-    # 대기열 UI가 있으면 실제 게임이 표시될 때까지 대기
-    try:
-      # showRealPage 함수가 호출되어 대기열이 끝나면 게임 요소가 나타남
-      # amoundApply(수량 드롭다운)이 보이면 게임 페이지가 준비된 것
-      WebDriverWait(self.driver, timeout).until(
-        lambda d: d.find_elements(By.ID, 'amoundApply') or
-                  d.find_elements(By.ID, 'btnSelectNum') or
-                  d.execute_script('return typeof selectWayTab === "function"')
-      )
-      elapsed = round(time.time() - start, 1)
-      print(f'[대기열] ✅ 게임 페이지 준비 완료 ({elapsed}초 소요)')
-    except TimeoutException:
-      elapsed = round(time.time() - start, 1)
-      print(f'[대기열] ⚠️ {elapsed}초 대기 후에도 게임 요소를 찾지 못함')
-      # 현재 페이지 상태 덤프
-      self._dump_page_state()
-      raise Exception(f'게임 페이지 로딩 타임아웃 ({elapsed}초). 대기열이 해소되지 않았거나 페이지 구조가 변경되었습니다.')
-
-    time.sleep(1)  # 추가 안정화 대기
-
-  def _select_auto_number(self):
-    """자동 번호 선택 (여러 방법 시도)"""
-    methods = [
-      self._select_auto_method_script,
-      self._select_auto_method_onclick,
-      self._select_auto_method_tab,
-      self._select_auto_method_text,
-      self._select_auto_method_js_click,
-    ]
-
-    for i, method in enumerate(methods, 1):
-      try:
-        method(i)
-        return  # 성공하면 바로 리턴
-      except Exception as e:
-        print(f'[로또 구매] ⚠️ 방법 {i} 실패: {str(e)[:120]}')
-
-    # 모든 방법 실패 - 페이지 상태 덤프 후 에러
-    print('[로또 구매] ❌ 모든 자동 번호 선택 방법 실패')
-    self._dump_page_state()
-    raise Exception('자동 번호 선택을 할 수 없습니다. 페이지 구조가 변경되었을 수 있습니다.')
-
-  def _select_auto_method_script(self, num):
-    """방법 1: selectWayTab JavaScript 함수 호출"""
-    print(f'[로또 구매] 방법 {num}: selectWayTab 함수 호출...')
-    WebDriverWait(self.driver, 5).until(
-      lambda d: d.execute_script('return typeof selectWayTab === "function"')
-    )
-    self.driver.execute_script('selectWayTab(1)')
-    time.sleep(1)
-    print(f'[로또 구매] ✅ 자동 번호 선택 성공 (selectWayTab)')
-
-  def _select_auto_method_onclick(self, num):
-    """방법 2: onclick 속성으로 버튼 찾기"""
-    print(f'[로또 구매] 방법 {num}: onclick 버튼 클릭...')
-    auto_tab = WebDriverWait(self.driver, 5).until(
-      EC.element_to_be_clickable((By.XPATH, '//a[contains(@onclick, "selectWayTab(1)")]'))
-    )
-    auto_tab.click()
-    time.sleep(1)
-    print(f'[로또 구매] ✅ 자동 번호 선택 성공 (onclick)')
-
-  def _select_auto_method_tab(self, num):
-    """방법 3: ID/class로 자동 탭 찾기"""
-    print(f'[로또 구매] 방법 {num}: 탭 요소 찾기...')
-    xpaths = [
-      '//div[@id="check2" or contains(@class, "select_auto")]//a',
-      '//li[@id="check2"]//a',
-      '//input[@id="check2"]',
-      '//*[@id="selway1"]',
-    ]
-    for xpath in xpaths:
-      try:
-        el = self.driver.find_element(By.XPATH, xpath)
-        el.click()
-        time.sleep(1)
-        print(f'[로또 구매] ✅ 자동 번호 선택 성공 (탭: {xpath})')
-        return
-      except:
-        continue
-    raise Exception('탭 요소를 찾을 수 없음')
-
-  def _select_auto_method_text(self, num):
-    """방법 4: 텍스트 내용으로 자동 버튼 찾기"""
-    print(f'[로또 구매] 방법 {num}: 텍스트 검색...')
-    xpaths = [
-      '//a[contains(text(), "자동")]',
-      '//span[contains(text(), "자동")]/ancestor::a',
-      '//label[contains(text(), "자동")]',
-      '//input[@value="자동" or @title="자동"]',
-      '//*[contains(text(), "자동번호")]',
-    ]
-    for xpath in xpaths:
-      try:
-        el = self.driver.find_element(By.XPATH, xpath)
-        el.click()
-        time.sleep(1)
-        print(f'[로또 구매] ✅ 자동 번호 선택 성공 (텍스트: {xpath})')
-        return
-      except:
-        continue
-    raise Exception('자동 텍스트 요소를 찾을 수 없음')
-
-  def _select_auto_method_js_click(self, num):
-    """방법 5: 페이지 내 자동 선택 관련 함수를 JS로 직접 탐색/실행"""
-    print(f'[로또 구매] 방법 {num}: JavaScript 탐색...')
-    # 페이지에 있는 자동 선택 관련 함수 목록 확인
-    js_attempts = [
-      'selectWayTab(1)',
-      'document.querySelector(\'[id*="auto"]\') && document.querySelector(\'[id*="auto"]\').click()',
-      'document.querySelector(\'[class*="auto"]\') && document.querySelector(\'[class*="auto"]\').click()',
-      'document.querySelector(\'input[name="selway"][value="1"]\') && document.querySelector(\'input[name="selway"][value="1"]\').click()',
-    ]
-    for js in js_attempts:
-      try:
-        result = self.driver.execute_script(f'try {{ {js}; return true; }} catch(e) {{ return false; }}')
-        if result:
-          time.sleep(1)
-          print(f'[로또 구매] ✅ 자동 번호 선택 성공 (JS: {js[:50]})')
-          return
-      except:
-        continue
-    raise Exception('JavaScript 자동 선택 실패')
-
-  def _dump_page_state(self):
-    """디버깅용 페이지 상태 덤프"""
-    try:
-      page_source = self.driver.page_source
-      # 중요한 HTML 구조만 출력 (처음 3000자)
-      print('[디버그] === 페이지 소스 (앞부분) ===')
-      print(page_source[:3000])
-      print('[디버그] === 페이지 소스 끝 ===')
-
-      # 주요 요소 존재 여부 확인
-      checks = {
-        'amoundApply': By.ID,
-        'btnSelectNum': By.ID,
-        'btnBuy': By.NAME,
-        'reportRow': By.ID,
-        'popupLayerAlert': By.ID,
-      }
-      for name, by in checks.items():
-        found = len(self.driver.find_elements(by, name)) > 0
-        print(f'[디버그] {name}: {"있음" if found else "없음"}')
-
-      # JS 함수 존재 여부
-      js_funcs = ['selectWayTab', 'selectInitCall', 'showRealPage', 'closepopupLayerConfirm']
-      for func in js_funcs:
-        try:
-          exists = self.driver.execute_script(f'return typeof {func} === "function"')
-          print(f'[디버그] JS {func}: {"있음" if exists else "없음"}')
-        except:
-          print(f'[디버그] JS {func}: 확인 실패')
-    except Exception as e:
-      print(f'[디버그] 페이지 상태 덤프 실패: {e}')
-
-  def _safe_click(self, element, element_name="버튼", max_retries=3):
-    """오버레이를 피해 안전하게 클릭 (재시도 포함)"""
-    for attempt in range(max_retries):
-      try:
-        # 1. 오버레이 사라질 때까지 대기
-        self._wait_for_overlay_to_disappear()
-
-        # 2. 요소가 클릭 가능할 때까지 대기
-        WebDriverWait(self.driver, 10).until(
-          EC.element_to_be_clickable(element)
-        )
-
-        # 3. 일반 클릭 시도
-        element.click()
-        print(f'[클릭] ✅ {element_name} 클릭 성공')
-        return True
-      except Exception as e:
-        print(f'[클릭] ⚠️ {element_name} 클릭 시도 {attempt + 1}/{max_retries} 실패: {str(e)[:80]}')
-
-        if attempt < max_retries - 1:
-          # 재시도 전 추가 대기
-          time.sleep(1)
-          self._wait_for_overlay_to_disappear(timeout=5)
-
-          # JavaScript 클릭 시도
-          try:
-            self.driver.execute_script("arguments[0].click();", element)
-            print(f'[클릭] ✅ {element_name} JavaScript 클릭 성공')
-            return True
-          except Exception as js_e:
-            print(f'[클릭] ⚠️ JavaScript 클릭도 실패: {str(js_e)[:50]}')
-            time.sleep(1)
-        else:
-          raise Exception(f'{element_name} 클릭 실패: {e}')
-
+  # ------------------------------------------------------------------ 로그인
   def login(self, userid: str, password: str):
-    # 로그인 화면
-    self.driver.get('https://dhlottery.co.kr/login')
-
-    # 아이디 입력
-    userid_field = WebDriverWait(self.driver, 10).until(
-      EC.presence_of_element_located((By.ID, 'inpUserId'))
-    )
-    userid_field.clear()
-    userid_field.send_keys(userid)
-
-    # 비밀번호 입력
-    password_field = self.driver.find_element(By.ID, 'inpUserPswdEncn')
-    password_field.clear()
-    password_field.send_keys(password)
-
-    # 로그인 버튼 클릭
-    login_button = self.driver.find_element(By.ID, 'btnLogin')
-    login_button.click()
-
-    # 로그인 성공하면 메인 화면으로 이동됨
-    # URL이 변경되거나 메인 페이지로 이동하는지 확인
+    print(f'[로그인] {userid} 로그인 시도...')
     try:
-      WebDriverWait(self.driver, 10).until(
-        lambda driver: driver.current_url != 'https://dhlottery.co.kr/login'
+      resp = self._get(f'{self.BASE_URL}/')
+      if 'index_check.html' in resp.url:
+        raise LotteryError('동행복권 사이트가 현재 시스템 점검중입니다.')
+      self._get(self.LOGIN_PAGE)
+
+      rsa = self._get(self.RSA_KEY_URL, headers=self._json_headers(self.LOGIN_PAGE)).json().get('data')
+      if not rsa:
+        raise LotteryError('로그인용 RSA 키를 가져올 수 없습니다.')
+      modulus, exponent = rsa['rsaModulus'], rsa['publicExponent']
+
+      resp = self._post(
+        self.LOGIN_URL,
+        headers={'Origin': self.BASE_URL, 'Referer': self.LOGIN_PAGE},
+        data={
+          'userId': self._rsa_encrypt(userid, modulus, exponent),
+          'userPswdEncn': self._rsa_encrypt(password, modulus, exponent),
+          'inpUserId': userid,
+        },
       )
-      
-      # 로그인 실패 시 에러 메시지 확인
-      try:
-        error_msg = self.driver.find_element(By.CLASS_NAME, 'error-message')
-        if error_msg.is_displayed():
-          raise Exception(f'로그인 실패: {error_msg.text}')
-      except:
-        pass  # 에러 메시지가 없으면 로그인 성공으로 간주
-      
-      # 로그인 후 페이지 로딩 대기
-      time.sleep(2)
-    except Exception as e:
-      # 로그인 실패 가능성 확인
-      if 'login' in self.driver.current_url.lower():
-        raise Exception(f'로그인 실패: 로그인 페이지에 머물러 있습니다. {e}')
+      if resp.status_code != 200 or 'loginSuccess' not in resp.url:
+        raise LotteryError('로그인에 실패했습니다. 아이디 또는 비밀번호를 확인해주세요.')
+
+      # 구매 도메인(ol.dhlottery.co.kr)의 JSESSIONID 를 받아둔다.
+      self._get(f'{self.BASE_URL}/main')
+      self._get(self.GAME645_PAGE)
+      self.userid = userid
+      print('[로그인] ✅ 로그인 성공')
+    except LotteryError:
       raise
+    except Exception as e:
+      raise LotteryError(f'로그인 실패: {e}') from e
+
+  # ------------------------------------------------------------------ 잔고
+  def get_balance_info(self) -> Dict[str, int]:
+    resp = self._get(self.BALANCE_URL, headers=self._json_headers(self.MYPAGE_URL))
+    if resp.status_code != 200 or 'json' not in resp.headers.get('Content-Type', '').lower():
+      raise LotteryError('예치금 조회 API 응답 오류 (세션 만료 가능성)')
+    mndp = resp.json().get('data', {}).get('userMndp', {}) or {}
+
+    def amt(key):
+      return to_int(mndp.get(key))
+
+    total = (
+      (amt('pntDpstAmt') - amt('pntTkmnyAmt'))
+      + (amt('ncsblDpstAmt') - amt('ncsblTkmnyAmt'))
+      + (amt('csblDpstAmt') - amt('csblTkmnyAmt'))
+    )
+    return {
+      'total': total,  # 총예치금
+      'available': amt('crntEntrsAmt'),  # 구매가능금액
+      'reserved': amt('rsvtOrdrAmt'),  # 예약구매금액
+      'withdrawing': amt('dawAplyAmt'),  # 출금신청중금액
+    }
 
   def getBalance(self) -> str:
     try:
-      # 마이페이지로 이동해서 확인
-      self.driver.get('https://dhlottery.co.kr/mypage/home')
-      time.sleep(3)
-      
-      # 잔액 ID로 직접 찾기
-      try:
-        balance_element = WebDriverWait(self.driver, 10).until(
-          EC.presence_of_element_located((By.ID, 'totalAmt'))
-        )
-        balance_text = balance_element.text.strip()
-        # 숫자와 원이 포함된 텍스트 추출
-        match = re.search(r'[\d,]+원', balance_text)
-        if match:
-          return match.group()
-        # 원이 없으면 원 추가
-        if balance_text and balance_text.replace(',', '').replace('원', '').isdigit():
-          if '원' not in balance_text:
-            return f'{balance_text}원'
-          return balance_text
-      except:
-        pass
-      
-      # 대체 방법: 다양한 선택자 시도
-      selectors = [
-        (By.ID, 'totalAmt'),
-        (By.XPATH, '//*[@id="totalAmt"]'),
-        (By.CSS_SELECTOR, '#totalAmt'),
-        (By.XPATH, '//*[contains(@id, "totalAmt")]'),
-        (By.XPATH, '//*[contains(text(), "예치금")]'),
-        (By.XPATH, '//*[contains(text(), "잔액")]'),
-      ]
-      
-      for by, selector in selectors:
-        try:
-          element = self.driver.find_element(by, selector)
-          text = element.text.strip()
-          match = re.search(r'[\d,]+원', text)
-          if match:
-            return match.group()
-          if text and text.replace(',', '').replace('원', '').isdigit():
-            if '원' not in text:
-              return f'{text}원'
-            return text
-        except:
-          continue
-      
-      return '잔고 확인 실패 (페이지 구조 확인 필요)'
+      info = self.get_balance_info()
+      return f'{info["available"]:,}원'
     except Exception as e:
       return f'잔고 확인 실패: {e}'
 
-  def _get_popup_layer_message(self):
-    try:
-      layer_message = self.driver.find_element(By.XPATH, '//div[@id="popupLayerAlert"]/div/div/span[@class="layer-message"]')
-      WebDriverWait(self.driver, 2).until(EC.visibility_of(layer_message))  # 타임아웃을 2초로 단축
-      return layer_message.text
-    except:
-      # 팝업이 없으면 None 반환 (정상적인 경우)
-      return None
+  # ------------------------------------------------------------------ 로또 6/45 구매
+  def _get_lo40_round_info(self, allow_fallback: bool) -> Dict[str, str]:
+    """구매 페이지에서 현재 회차/추첨일/지급기한을 읽는다. (dryrun 이면 실패 시 날짜로 계산)"""
+    html = self._get(self.GAME645_PAGE).text
+    round_match = re.search(r'id="curRound"[^>]*>\s*(\d+)\s*<', html)
+    draw_match = re.search(r'id="ROUND_DRAW_DATE"[^>]*value="([\d/]+)"', html)
+    limit_match = re.search(r'id="WAMT_PAY_TLMT_END_DT"[^>]*value="([\d/]+)"', html)
+    if round_match and draw_match and limit_match:
+      return {'round': round_match.group(1), 'draw_date': draw_match.group(1), 'pay_limit_date': limit_match.group(1)}
 
-  def _check_purchase_limit_popup(self):
-    """구매한도 팝업 확인"""
-    try:
-      # 구매한도 팝업 확인
-      limit_popup = self.driver.find_element(By.ID, 'recommend720Plus')
-      if limit_popup.is_displayed():
-        try:
-          # 팝업 내용 읽기
-          cont1 = limit_popup.find_element(By.XPATH, './/p[@class="cont1"]')
-          message = cont1.text.strip()
-          print(f'[구매한도] 구매한도 팝업 발견: {message[:100]}...')
-          return message
-        except:
-          return '구매한도에 도달했습니다.'
-    except:
-      pass
-    return None
+    if not allow_fallback:
+      raise LotteryError('구매 페이지에서 회차 정보를 찾지 못했습니다. (세션 만료 또는 사이트 구조 변경)')
+    print('[로또 구매] ⚠️ 구매 페이지에서 회차 정보를 못 찾아 날짜로 계산합니다.')
+    return self.calculate_lo40_round_info(datetime.datetime.now(KST).date())
 
-  # 로또 6/45
+  @staticmethod
+  def calculate_lo40_round_info(today: datetime.date) -> Dict[str, str]:
+    """로또 6/45 는 2002-12-07(토) 1회부터 매주 토요일 추첨."""
+    draw_date = today + datetime.timedelta(days=(5 - today.weekday()) % 7)
+    round_number = 1 + (draw_date - datetime.date(2002, 12, 7)).days // 7
+    pay_limit_date = draw_date + datetime.timedelta(days=366)
+    return {
+      'round': str(round_number),
+      'draw_date': draw_date.strftime('%Y/%m/%d'),
+      'pay_limit_date': pay_limit_date.strftime('%Y/%m/%d'),
+    }
+
+  def _wait_ready_socket(self) -> str:
+    """접속 대기열을 통과하고 구매 서버 주소(direct)를 받는다."""
+    deadline = time.time() + self.READY_MAX_WAIT
+    while True:
+      resp = self._post(self.READY_SOCKET_URL, headers={'Referer': self.GAME645_PAGE, 'Origin': self.OL_URL})
+      data = json.loads(resp.text)
+      ready_cnt = int(data.get('ready_cnt') or 0)
+      if ready_cnt <= 0:
+        return data.get('ready_ip', '')
+      if time.time() > deadline:
+        raise LotteryError(f'접속 대기열이 너무 깁니다 (대기 인원 {ready_cnt}명)')
+      wait = min(max(int(data.get('ready_time') or 3), 1), 10)
+      print(f'[로또 구매] 접속 대기중... (대기 인원 {ready_cnt}명, {wait}초 후 재시도)')
+      time.sleep(wait)
+
+  @staticmethod
+  def make_lo40_param(count: int) -> str:
+    """자동 번호 count 게임 구매 파라미터. (alpabet 은 사이트 쪽 오타 그대로)"""
+    return json.dumps([
+      {'genType': '0', 'arrGameChoiceNum': None, 'alpabet': 'ABCDE'[i]}
+      for i in range(count)
+    ])
+
+  @staticmethod
+  def format_lo40_numbers(lines: List[str]) -> List[str]:
+    """
+    예: ["A|01|02|04|27|39|443"] -> ["A 자동: 01 02 04 27 39 44"]
+    마지막 글자는 선택구분 (1: 수동, 2: 반자동, 3: 자동)
+    """
+    mode = {'1': '수동', '2': '반자동', '3': '자동'}
+    result = []
+    for line in lines:
+      if not line:
+        continue
+      body, gbn = line[:-1], line[-1]
+      parts = body.split('|')
+      result.append(f'{parts[0]} {mode.get(gbn, "?")}: {" ".join(parts[1:])}')
+    return result
+
   def buyLo40(self, count: int, dryrun: bool) -> str:
     try:
+      if count > MAX_LO40_PER_BUY:
+        print(f'[로또 구매] ⚠️ 1회 최대 {MAX_LO40_PER_BUY}매까지 구매 가능하여 {MAX_LO40_PER_BUY}매로 조정합니다.')
+        count = MAX_LO40_PER_BUY
       print(f'[로또 구매] {count}매 구매 시작 (dryrun={dryrun})...')
-      self._safe_get('https://el.dhlottery.co.kr/game/TotalGame.jsp?LottoId=LO40')
-      print('[로또 구매] 페이지 로드 완료')
 
-      iframe = WebDriverWait(self.driver, 15).until(
-        EC.presence_of_element_located((By.TAG_NAME, 'iframe'))
-      )
-      self.driver.switch_to.frame(iframe)
-      print('[로또 구매] iframe 전환 완료')
-      
-      # iframe 내부가 완전히 로드될 때까지 대기
-      # 대기열 시스템이 있을 수 있으므로 실제 게임 요소가 나타날 때까지 대기
-      print('[로또 구매] iframe 내부 로딩 대기 중...')
-      self._wait_for_game_ready(timeout=60)
+      info = self._get_lo40_round_info(allow_fallback=dryrun)
+      print(f'[로또 구매] 회차: {info["round"]}, 추첨일: {info["draw_date"]}')
 
-      # 판매시간 확인 (팝업이 있으면 판매시간이 아님)
-      message = self._get_popup_layer_message()
-      if message:
-        print(f'[로또 구매] ❌ 판매시간 아님: {message}')
-        raise Exception(message)
+      # 재실행 등으로 같은 회차를 중복 구매하지 않도록 이미 산 수량만큼 뺀다. (회차당 최대 5매)
+      bought = self.get_bought_count(info['round'])
+      if bought:
+        print(f'[로또 구매] 이번 회차 이미 구매한 수량: {bought}매')
+      remain = min(count, MAX_LO40_PER_BUY - bought)
+      if remain <= 0:
+        return f'로또 {info["round"]}회는 이미 {bought}매 구매해서 추가 구매하지 않습니다.'
+      if remain < count:
+        print(f'[로또 구매] ⚠️ 이미 {bought}매 구매해서 {remain}매만 구매합니다.')
+        count = remain
 
-      # 자동 번호 선택
-      print('[로또 구매] 자동 번호 선택 시도...')
-      self._select_auto_number()
+      available = self.get_balance_info()['available']
+      if available < 1000 * count:
+        raise LotteryError(f'예치금 부족 (구매가능금액 {available:,}원, 필요금액 {1000 * count:,}원)')
 
-      # 수량 선택
-      print(f'[로또 구매] 수량 {count}매 선택...')
-      count_dropdown = Select(self.driver.find_element(By.ID, 'amoundApply'))
-      count_dropdown.select_by_value(str(count))
-      print('[로또 구매] ✅ 수량 선택 완료')
-
-      # 수량 확인 버튼 (오버레이 대기 후 안전하게 클릭)
-      print('[로또 구매] 수량 확인 버튼 클릭...')
-      select_num_button = self.driver.find_element(By.ID, 'btnSelectNum')
-      self._safe_click(select_num_button, '수량 확인 버튼')
-      time.sleep(1)
-      print('[로또 구매] ✅ 수량 확인 완료')
-
-      if not dryrun:
-        print('[로또 구매] 실제 구매 진행...')
-        # 구매 버튼 누름 (오버레이 대기 후 안전하게 클릭)
-        print('[로또 구매] 구매 버튼 클릭...')
-        buy_button = self.driver.find_element(By.NAME, 'btnBuy')
-        self._safe_click(buy_button, '구매 버튼')
-        time.sleep(2)  # 팝업이 뜰 시간 확보
-        print('[로또 구매] ✅ 구매 버튼 클릭 완료')
-
-        # 구매한도 팝업 확인 (구매 버튼 클릭 후)
-        print('[로또 구매] 구매한도 팝업 확인 중...')
-        limit_message = self._check_purchase_limit_popup()
-        if limit_message:
-          print(f'[로또 구매] ❌ 구매한도 초과: {limit_message}')
-          # 팝업 닫기
-          try:
-            close_button = self.driver.find_element(By.XPATH, '//div[@id="recommend720Plus"]//a[contains(@href, "closeRecomd720Popup")]')
-            close_button.click()
-            time.sleep(1)
-            print('[로또 구매] 구매한도 팝업 닫기 완료')
-          except:
-            pass
-          raise Exception(f'구매한도 초과: {limit_message}')
-
-        # 구매 확인 누름
-        print('[로또 구매] 구매 확인 팝업 처리...')
-        try:
-          self.driver.execute_script('closepopupLayerConfirm(true)')
-          time.sleep(3)  # 구매 처리 시간 확보
-          print('[로또 구매] ✅ 구매 확인 완료')
-        except Exception as e:
-          print(f'[로또 구매] ⚠️ 구매 확인 스크립트 실행 실패: {e}')
-          # 스크립트 실행 실패 시 직접 확인 버튼 클릭 시도
-          try:
-            confirm_button = self.driver.find_element(By.XPATH, '//a[contains(@onclick, "closepopupLayerConfirm") or contains(@href, "closepopupLayerConfirm")]')
-            confirm_button.click()
-            time.sleep(3)
-            print('[로또 구매] ✅ 구매 확인 버튼 클릭 완료')
-          except:
-            print('[로또 구매] ⚠️ 구매 확인 버튼을 찾을 수 없습니다.')
-
-        # 구매한도 팝업 다시 확인 (구매 확인 후)
-        print('[로또 구매] 구매 확인 후 구매한도 팝업 재확인...')
-        limit_message = self._check_purchase_limit_popup()
-        if limit_message:
-          print(f'[로또 구매] ❌ 구매 확인 후 구매한도 초과: {limit_message}')
-          # 팝업 닫기
-          try:
-            close_button = self.driver.find_element(By.XPATH, '//div[@id="recommend720Plus"]//a[contains(@href, "closeRecomd720Popup")]')
-            close_button.click()
-            time.sleep(1)
-          except:
-            pass
-          raise Exception(f'구매한도 초과: {limit_message}')
-
-        # 에러 메시지 확인
-        print('[로또 구매] 에러 메시지 확인 중...')
-        error_message = self._get_popup_layer_message()
-        if error_message:
-          print(f'[로또 구매] ❌ 에러 메시지 발견: {error_message}')
-          raise Exception(f'구매 실패: {error_message}')
-
-        # 구매 결과 확인
-        print('[로또 구매] 구매 결과 확인 중...')
-        try:
-          report_row = self.driver.find_element(By.ID, 'reportRow')
-          print(f'[로또 구매] reportRow 요소 찾음, li 요소 대기 중...')
-          
-          # 더 긴 대기 시간과 더 자세한 로그
-          try:
-            WebDriverWait(self.driver, 15).until(
-              lambda driver: len(report_row.find_elements(By.XPATH, './li')) > 0
-            )
-            report_count = len(report_row.find_elements(By.XPATH, './li'))
-            print(f'[로또 구매] 구매 결과: {report_count}매 구매됨 (요청: {count}매)')
-            
-            if count != report_count:
-              print(f'[로또 구매] ❌ 구매 수량 불일치')
-              raise Exception(f'로또 구매 실패 {count - report_count}건 있음')
-            
-            print(f'[로또 구매] ✅ 구매 성공: {count}매')
-          except TimeoutException:
-            # 타임아웃 발생 시 현재 상태 확인
-            print('[로또 구매] ⚠️ 구매 결과 확인 타임아웃')
-            print(f'[로또 구매] 현재 reportRow의 li 개수: {len(report_row.find_elements(By.XPATH, "./li"))}')
-            
-            # 페이지 소스 일부 확인
-            try:
-              page_source_snippet = self.driver.page_source[:1000]
-              if '구매완료' in page_source_snippet or '완료' in page_source_snippet:
-                print('[로또 구매] ⚠️ 구매 완료 메시지가 페이지에 있지만 reportRow에 항목이 없습니다.')
-                print('[로또 구매] ⚠️ 구매는 성공했을 수 있으나 결과 확인 실패')
-                # 구매 성공으로 간주 (실제로는 성공했을 가능성이 높음)
-                return f'로또 구매완료: {count}매 (결과 확인 불가)'
-              else:
-                raise Exception('구매 결과를 확인할 수 없습니다. 구매가 실패했을 수 있습니다.')
-            except:
-              raise Exception('구매 결과를 확인할 수 없습니다.')
-        except NoSuchElementException:
-          print('[로또 구매] ⚠️ reportRow 요소를 찾을 수 없습니다.')
-          # 대체 방법: 페이지에 성공 메시지가 있는지 확인
-          try:
-            page_source = self.driver.page_source
-            if '구매완료' in page_source or '완료' in page_source:
-              print('[로또 구매] ⚠️ 구매 완료 메시지 발견, 구매 성공으로 간주')
-              return f'로또 구매완료: {count}매 (결과 확인 불가)'
-            else:
-              raise Exception('구매 결과를 확인할 수 없습니다.')
-          except:
-            raise Exception('구매 결과를 확인할 수 없습니다.')
-      else:
-        print('[로또 구매] ✅ dryrun 모드 완료')
-
-      return f'로또 구매완료: {count}매'
-    except LotteryError:
-      raise  # 이미 처리된 에러는 그대로 전달
-    except Exception as e:
-      self._handle_error('로또 구매', e)
-
-  # 연금복권 720+
-  def buyLp72(self, count: int, dryrun: bool) -> str:
-    try:
-      print(f'[연금복권 구매] {count}매 구매 시작 (dryrun={dryrun})...')
-      self._safe_get('https://el.dhlottery.co.kr/game/TotalGame.jsp?LottoId=LP72')
-      print('[연금복권 구매] 페이지 로드 완료')
-
-      iframe = self.driver.find_element(By.TAG_NAME, 'iframe')
-      self.driver.switch_to.frame(iframe)
-      print('[연금복권 구매] iframe 전환 완료')
-
-      if count == 5:
-        print('[연금복권 구매] 같은조 5매 선택 모드...')
-        # 자동 번호 선택
-        auto_button = self.driver.find_element(By.CLASS_NAME, 'lotto720_btn_auto_number')
-        auto_button.click()
-        print('[연금복권 구매] ✅ 자동 번호 선택 완료')
-
-        # 구매 등록
-        confirm_button = self.driver.find_element(By.CLASS_NAME, 'lotto720_btn_confirm_number')
-        confirm_button.click()
-        print('[연금복권 구매] ✅ 구매 등록 완료')
-      else:
-        print(f'[연금복권 구매] {count}매 선택 모드...')
-        for i in range(count):
-          # 랜덤으로 조 선택
-          jo = randint(1, 5)
-          print(f'[연금복권 구매] {i+1}/{count} - {jo}조 선택...')
-          jo_button = self.driver.find_element(By.XPATH, f'//span[@class="notranslate lotto720_box jogroup num{jo}"]')
-          jo_button.click()
-
-          # 자동 번호 선택
-          auto_button = self.driver.find_element(By.CLASS_NAME, 'lotto720_btn_auto_number')
-          auto_button.click()
-
-          # 구매 등록
-          confirm_button = self.driver.find_element(By.CLASS_NAME, 'lotto720_btn_confirm_number')
-          confirm_button.click()
-          print(f'[연금복권 구매] ✅ {i+1}/{count} 등록 완료')
-
-      # 구매 버튼
-      print('[연금복권 구매] 구매 버튼 클릭...')
-      buy1_button = self.driver.find_element(By.CLASS_NAME, 'lotto720_btn_pay')
-      buy1_button.click()
-      time.sleep(1)
-      print('[연금복권 구매] ✅ 구매 버튼 클릭 완료')
-
-      print('[연금복권 구매] Alert 확인...')
-      Alert(self.driver).accept()
-      time.sleep(1)
-      print('[연금복권 구매] ✅ Alert 확인 완료')
-
-      if not dryrun:
-        print('[연금복권 구매] 실제 구매 진행...')
-        # 구매 버튼이 하나 더 있음
-        print('[연금복권 구매] 최종 구매 확인 버튼 클릭...')
-        buy2_button = self.driver.find_element(By.XPATH, '//div[@id="lotto720_popup_confirm"]/div/div[@class="lotto720_popup_bottom_wrapper btn_area"]/a')
-        WebDriverWait(self.driver, 10).until(EC.visibility_of(buy2_button))
-        buy2_button.click()
-        time.sleep(2)  # 구매 처리 시간 확보
-        print('[연금복권 구매] ✅ 최종 구매 확인 완료')
-
-        # 구매한도 팝업 확인
-        print('[연금복권 구매] 구매한도 팝업 확인 중...')
-        limit_message = self._check_purchase_limit_popup()
-        if limit_message:
-          print(f'[연금복권 구매] ❌ 구매한도 초과: {limit_message}')
-          # 팝업 닫기
-          try:
-            close_button = self.driver.find_element(By.XPATH, '//div[@id="recommend720Plus"]//a[contains(@href, "closeRecomd720Popup")]')
-            close_button.click()
-            time.sleep(1)
-          except:
-            pass
-          raise Exception(f'구매한도 초과: {limit_message}')
-
-        # 구매 결과 확인
-        print('[연금복권 구매] 구매 결과 확인 중...')
-        sale_span = self.driver.find_element(By.CLASS_NAME, 'saleCnt')
-        WebDriverWait(self.driver, 10).until(EC.visibility_of(sale_span))
-        sale_count = int(sale_span.text)
-        print(f'[연금복권 구매] 구매 결과: {sale_count}매 구매됨 (요청: {count}매)')
-        if sale_count != count:
-          print(f'[연금복권 구매] ❌ 구매 수량 불일치')
-          raise Exception(f'연금복권 구매 실패 {count - sale_count}건 있음')
-        
-        print(f'[연금복권 구매] ✅ 구매 성공: {count}매')
-      else:
-        print('[연금복권 구매] ✅ dryrun 모드 완료')
-
-      return f'연금복권 구매완료: {count}매'
-    except LotteryError:
-      raise
-    except Exception as e:
-      self._handle_error('연금복권 구매', e)
-
-  def _code_to_name(self, code: str):
-    dict = {
-      'LO40': '로또 6/45',
-      'LP72': '연금복권 720+'
-    }
-    return dict.get(code, code)
-
-  def check(self, code: str):
-    try:
-      print(f'[당첨 확인] {self._code_to_name(code)} 확인 시작...')
-      
-      # 구매/당첨 내역 페이지로 이동
-      print('[당첨 확인] 구매/당첨 내역 페이지로 이동 중...')
-      self.driver.get('https://dhlottery.co.kr/mypage/mylotteryledger')
-      
-      # 페이지 로딩 대기 - 검색 버튼이 나타날 때까지 대기
-      print('[당첨 확인] 페이지 로딩 대기 중...')
-      try:
-        WebDriverWait(self.driver, 15).until(
-          EC.presence_of_element_located((By.ID, 'btnSrch'))
-        )
-        print('[당첨 확인] ✅ 페이지 로딩 완료')
-      except:
-        print('[당첨 확인] ⚠️ 페이지 로딩 타임아웃')
-      
-      time.sleep(2)
-      print(f'[당첨 확인] 현재 URL: {self.driver.current_url}')
-      
-      # 페이지가 로드되었는지 확인 (404가 아닌지)
-      if 'error' in self.driver.current_url.lower() or '404' in self.driver.page_source[:1000]:
-        print('[당첨 확인] ❌ 페이지 로드 실패 (404 또는 에러)')
-        return f'당첨 확인 실패: 구매/당첨 내역 페이지를 찾을 수 없습니다. 페이지 구조가 변경되었을 수 있습니다.'
-      
-      # 1. 최근 1주일 버튼 클릭
-      print('[당첨 확인] 최근 1주일 버튼 클릭 시도...')
-      try:
-        week_button = WebDriverWait(self.driver, 10).until(
-          EC.element_to_be_clickable((By.XPATH, '//button[contains(@onclick, "fn_chgDt") and contains(@onclick, "\'2\'")]'))
-        )
-        week_button.click()
-        time.sleep(1)
-        print('[당첨 확인] ✅ 최근 1주일 버튼 클릭 성공')
-      except:
-        # 다른 방법으로 시도
-        try:
-          week_button = self.driver.find_element(By.XPATH, '//button[contains(text(), "최근 1주일")]')
-          week_button.click()
-          time.sleep(1)
-          print('[당첨 확인] ✅ 최근 1주일 버튼 클릭 성공 (대체 방법)')
-        except:
-          print('[당첨 확인] ⚠️ 최근 1주일 버튼을 찾을 수 없음 (계속 진행)')
-      
-      # 2. 검색 버튼 클릭
-      print('[당첨 확인] 검색 버튼 클릭 시도...')
-      try:
-        # JavaScript가 완전히 로드될 때까지 더 긴 대기
-        search_button = WebDriverWait(self.driver, 20).until(
-          EC.element_to_be_clickable((By.ID, 'btnSrch'))
-        )
-        # 추가 대기 - 버튼이 보이지만 클릭 가능하지 않을 수 있음
-        time.sleep(1)
-        search_button.click()
-        time.sleep(3)  # 테이블 로딩 대기
-        print('[당첨 확인] ✅ 검색 버튼 클릭 성공, 테이블 로딩 대기 중...')
-      except Exception as e1:
-        print(f'[당첨 확인] ⚠️ 첫 번째 시도 실패: {e1}')
-        # JavaScript로 직접 클릭
-        try:
-          print('[당첨 확인] JavaScript로 검색 버튼 클릭 시도...')
-          self.driver.execute_script('document.getElementById("btnSrch").click();')
-          time.sleep(3)
-          print('[당첨 확인] ✅ 검색 버튼 클릭 성공 (JavaScript)')
-        except Exception as e2:
-          print(f'[당첨 확인] ⚠️ JavaScript 시도 실패: {e2}')
-          # XPath로 시도
-          try:
-            search_button = self.driver.find_element(By.XPATH, '//button[@id="btnSrch"]')
-            search_button.click()
-            time.sleep(3)
-            print('[당첨 확인] ✅ 검색 버튼 클릭 성공 (XPath)')
-          except Exception as e3:
-            print(f'[당첨 확인] ❌ 모든 방법 실패: {e3}')
-            return f'당첨 확인 실패: 검색 버튼을 찾을 수 없습니다.'
-      
-      # 3. 결과 테이블 확인
-      print('[당첨 확인] 결과 테이블 확인 중...')
-      try:
-        winning_list = WebDriverWait(self.driver, 10).until(
-          EC.presence_of_element_located((By.ID, 'winning-history-list'))
-        )
-        print('[당첨 확인] ✅ 결과 테이블 찾음')
-      except:
-        print('[당첨 확인] ❌ 결과 테이블을 찾을 수 없음')
-        return f'{self._code_to_name(code)} 당첨 없음 (결과 테이블을 찾을 수 없습니다)'
-      
-      # 당첨 결과가 있는지 확인
-      print('[당첨 확인] 테이블 행 수 확인 중...')
-      try:
-        rows = winning_list.find_elements(By.XPATH, './/li[contains(@class, "whl-row")]')
-        print(f'[당첨 확인] 총 {len(rows)}개의 행을 찾음')
-        if len(rows) == 0:
-          print('[당첨 확인] ⚠️ 행이 없음')
-          return f'{self._code_to_name(code)} 당첨 없음'
-      except Exception as e:
-        print(f'[당첨 확인] ❌ 행 찾기 실패: {e}')
-        return f'{self._code_to_name(code)} 당첨 없음'
-      
-      # 복권명 매핑
-      lottery_name_map = {
-        'LO40': '로또645',
-        'LP72': '연금복권720+'
+      data = {
+        'round': info['round'],
+        'direct': '',
+        'nBuyAmount': str(1000 * count),
+        'param': self.make_lo40_param(count),
+        'ROUND_DRAW_DATE': info['draw_date'],
+        'WAMT_PAY_TLMT_END_DT': info['pay_limit_date'],
+        'gameCnt': str(count),
+        'saleMdaDcd': '10',
       }
-      target_lottery_name = lottery_name_map.get(code, '')
-      print(f'[당첨 확인] 대상 복권명: {target_lottery_name}')
-      
-      # 당첨된 항목만 필터링 (당첨금이 "-"가 아니고 "0 원"이 아닌 것)
-      print('[당첨 확인] 당첨 항목 필터링 중...')
-      winning_items = []
-      checked_count = 0
-      matched_count = 0
-      
-      for row in rows:
-        try:
-          checked_count += 1
-          # 복권명 확인 (먼저 복권명으로 필터링)
-          name_elem = row.find_element(By.XPATH, './/div[contains(@class, "col-name")]//span[contains(@class, "whl-txt")]')
-          lottery_name = name_elem.text.strip()
-          
-          # 코드에 맞는 복권만 처리
-          if lottery_name != target_lottery_name:
-            continue
-          
-          matched_count += 1
-          
-          # 당첨금 확인
-          prize_elem = row.find_element(By.XPATH, './/div[contains(@class, "col-am")]//span[contains(@class, "whl-txt")]')
-          prize_text = prize_elem.text.strip()
-          
-          # 당첨결과 확인
-          result_elem = row.find_element(By.XPATH, './/div[contains(@class, "col-result")]//span[contains(@class, "whl-txt")]')
-          result_text = result_elem.text.strip()
-          
-          print(f'[당첨 확인] 행 {checked_count}: {lottery_name}, 당첨금={prize_text}, 결과={result_text}')
-          
-          # 당첨금이 "-"가 아니고 "0 원"이 아니며, 당첨결과가 "미추첨"이 아닌 경우
-          if prize_text != '-' and prize_text != '0 원' and result_text != '미추첨':
-            # 구입일자
-            date_elem = row.find_element(By.XPATH, './/div[contains(@class, "col-date1")]//span[contains(@class, "whl-txt")]')
-            buy_date = date_elem.text.strip()
-            
-            # 회차
-            try:
-              round_elem = row.find_element(By.XPATH, './/div[contains(@class, "col-th")]//span[contains(@class, "whl-txt")]')
-              round_num = round_elem.text.strip()
-            except:
-              round_num = ''
-            
-            winning_items.append(f'{buy_date} {lottery_name} {round_num}회 {prize_text} ({result_text})')
-            print(f'[당첨 확인] ✅ 당첨 항목 추가: {buy_date} {lottery_name} {round_num}회 {prize_text}')
-        except Exception as e:
-          print(f'[당첨 확인] ⚠️ 행 {checked_count} 처리 중 오류: {e}')
-          continue
-      
-      print(f'[당첨 확인] 총 {checked_count}개 행 확인, {matched_count}개 {target_lottery_name} 매칭, {len(winning_items)}개 당첨')
-      
-      if len(winning_items) == 0:
-        print(f'[당첨 확인] ⚠️ 당첨 항목 없음')
-        return f'{self._code_to_name(code)} 당첨 없음'
-      
-      bar = '---------------------------------------'
-      messages = ['당첨된 게 있다!!!', bar]
-      messages.extend(winning_items)
-      messages.append(bar)
-      
-      print(f'[당첨 확인] ✅ {len(winning_items)}개 당첨 항목 발견!')
-      return '\n'.join(messages)
 
+      if dryrun:
+        print(f'[로또 구매] dryrun: 구매 요청 생략 {data}')
+        return f'[dryrun] 로또 {info["round"]}회 {count}매 구매 직전까지 확인 완료'
+
+      data['direct'] = self._wait_ready_socket()
     except LotteryError:
       raise
     except Exception as e:
-      self._handle_error('당첨 확인', e)
+      raise LotteryError(f'로또 구매 실패: {e}') from e
+
+    # 여기부터는 서버에 구매 요청이 갔을 수 있으므로, 알 수 없는 에러는 '실패'가 아니라 '확인 필요'로 알린다.
+    try:
+      resp = self._post(self.BUY_LO40_URL, headers={'Referer': self.GAME645_PAGE, 'Origin': self.OL_URL}, data=data, timeout=self.BUY_TIMEOUT)
+      print(f'[로또 구매] 응답: {resp.text[:500]}')
+      return self._parse_buy_response(json.loads(resp.text), info['round'], count)
+    except LotteryError:
+      raise
+    except Exception as e:
+      raise LotteryError(f'⚠️ 로또 구매 결과 확인 불가 ({e}). 구매되었을 수 있으니 재실행 전에 구매내역을 확인하세요.') from e
+
+  def get_bought_count(self, round_number: str) -> int:
+    """이번 회차에 이미 구매한 로또 수량"""
+    today = datetime.datetime.now(KST).date()
+    items = self.get_buy_list(today - datetime.timedelta(days=7), today)
+    return sum(
+      to_int(i.get('prchsQty')) for i in items
+      if i.get('ltGdsCd') == 'LO40' and str(i.get('ltEpsd') or i.get('ltEpsdView')) == str(round_number)
+    )
+
+  def _parse_buy_response(self, response: dict, round_number: str, count: int) -> str:
+    if response.get('loginYn') == 'N':
+      raise LotteryError('로또 구매 실패: 로그인 세션이 만료되었습니다.')
+    if response.get('isAllowed') == 'N':
+      raise LotteryError('로또 구매 실패: 비정상적인 접속 환경으로 차단되었습니다.')
+    if response.get('isGameManaged') == 'Y':
+      raise LotteryError(f'로또 구매 실패: {response.get("errorMsg")}')
+    if response.get('checkOltSaleTime') is False:
+      raise LotteryError('로또 구매 실패: 판매 시간이 아니거나 잘못된 요청입니다.')
+
+    result = response.get('result') or {}
+    if result.get('resultCode') != '100':
+      raise LotteryError(f'로또 구매 실패: {result.get("resultMsg") or "알 수 없는 오류"}')
+
+    lines = self.format_lo40_numbers(result.get('arrGameChoiceNum') or [])
+    print(f'[로또 구매] ✅ 구매 성공: {len(lines)}매')
+    return '\n'.join([f'로또 구매완료: {round_number}회 {len(lines) or count}매', *lines])
+
+  # ------------------------------------------------------------------ 당첨 확인
+  def get_buy_list(self, start: datetime.date, end: datetime.date) -> List[dict]:
+    self._get(self.LEDGER_PAGE)
+    resp = self._get(
+      self.LEDGER_URL,
+      headers=self._json_headers(self.LEDGER_PAGE),
+      params={
+        'srchStrDt': start.strftime('%Y%m%d'),
+        'srchEndDt': end.strftime('%Y%m%d'),
+        'pageNum': 1,
+        'recordCountPerPage': 100,
+        '_': int(time.time() * 1000),
+      },
+    )
+    if resp.status_code != 200 or 'json' not in resp.headers.get('Content-Type', '').lower():
+      raise LotteryError('구매 내역 조회 API 응답 오류 (세션 만료 가능성)')
+    return (resp.json().get('data') or {}).get('list') or []
+
+  def _get_lo40_ticket_numbers(self, item: dict) -> List[str]:
+    """구매 건의 상세 번호 (실패하면 빈 목록)"""
+    try:
+      buy_date = datetime.datetime.strptime(item['eltOrdrDt'], '%Y-%m-%d').date()
+      resp = self._get(self.TICKET_DETAIL_URL, headers=self._json_headers(self.LEDGER_PAGE), params={
+        'ntslOrdrNo': item['ntslOrdrNo'],
+        'srchStrDt': (buy_date - datetime.timedelta(days=7)).strftime('%Y%m%d'),
+        'srchEndDt': (buy_date + datetime.timedelta(days=7)).strftime('%Y%m%d'),
+        'barcd': item['gmInfo'],
+      })
+      data = resp.json().get('data') or {}
+      if not data.get('success'):
+        return []
+      mode = {1: '수동', 2: '반자동', 3: '자동'}
+      return [
+        f'  {g.get("idx", "")} {mode.get(g.get("type"), "자동")}: {" ".join(f"{n:02d}" for n in g.get("num", []))}'
+        for g in data['ticket'].get('game_dtl', [])
+      ]
+    except Exception as e:
+      print(f'[당첨 확인] ⚠️ 번호 상세 조회 실패: {e}')
+      return []
+
+  @staticmethod
+  def is_winning(item: dict) -> bool:
+    return to_int(item.get('ltWnAmt')) > 0 or item.get('ltWnResult') not in ('낙첨', '미추첨', None, '')
+
+  def check(self, code: str = 'LO40', days: int = 7) -> str:
+    try:
+      print(f'[당첨 확인] 로또 6/45 최근 {days}일 구매내역 확인...')
+      today = datetime.datetime.now(KST).date()
+      items = [i for i in self.get_buy_list(today - datetime.timedelta(days=days), today) if i.get('ltGdsCd') == code]
+      print(f'[당첨 확인] 로또 구매 건수: {len(items)}')
+
+      if not items:
+        return '로또 6/45 당첨 없음 (최근 구매 내역 없음)'
+
+      winnings = [i for i in items if self.is_winning(i)]
+      summary = [
+        f'{i.get("eltOrdrDt")} {i.get("ltEpsdView")}회 {i.get("prchsQty")}매: {i.get("ltWnResult")}'
+        for i in items
+      ]
+
+      if not winnings:
+        return '\n'.join(['로또 6/45 당첨 없음', *summary])
+
+      bar = '---------------------------------------'
+      lines = ['당첨된 게 있다!!!', bar]
+      for i in winnings:
+        lines.append(f'{i.get("eltOrdrDt")} 로또6/45 {i.get("ltEpsdView")}회 {to_int(i.get("ltWnAmt")):,}원 ({i.get("ltWnResult")})')
+        lines.extend(self._get_lo40_ticket_numbers(i))
+      lines.append(bar)
+      return '\n'.join(lines)
+    except LotteryError:
+      raise
+    except Exception as e:
+      raise LotteryError(f'당첨 확인 실패: {e}') from e

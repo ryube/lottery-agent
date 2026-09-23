@@ -36,7 +36,7 @@ class Message:
       'text': self.message,
     }
 
-    requests.post(url, json=payload)
+    requests.post(url, json=payload, timeout=10)
 
   def send_image(self):
     if not self.bottoken or not self.chatid:
@@ -49,4 +49,4 @@ class Message:
     data = {
       'chat_id': self.chatid,
     }
-    requests.post(url, files=files, data=data)
+    requests.post(url, files=files, data=data, timeout=30)

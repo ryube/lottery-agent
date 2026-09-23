@@ -1,13 +1,14 @@
-from selenium import webdriver
-from selenium.webdriver.chrome.webdriver import WebDriver
-from selenium.webdriver.chrome.options import Options
-from argparse import ArgumentParser, Namespace
-from dhlottery import DhLottery, LotteryError
-from message import Message
+from argparse import ArgumentParser, Namespace, SUPPRESS
 from os import getenv
-from time import sleep
+import sys
+import traceback
 
 from dotenv import load_dotenv
+
+from accounts import Account, resolve_accounts
+from dhlottery import DhLottery, LotteryError
+from message import Message
+
 load_dotenv(override=True)
 
 def show_welcome():
@@ -27,140 +28,128 @@ def int_or_default(value, default=0):
     return default
 
 def get_args():
-  headless = getenv('LTA_HEADLESS', '1') == '1'
   dryrun = getenv('LTA_DRYRUN', '0') == '1'
   lo40_count = int(getenv('LTA_LO40_COUNT', '1'))
-  lp72_count = int(getenv('LTA_LP72_COUNT', '1'))
+
+  # 모든 서브커맨드 공통 옵션 (계정 선택)
+  common = ArgumentParser(add_help=False)
+  common.add_argument('-p', '--profile', dest='profiles', action='append', metavar='NAME', help='프로필 파일(~/.dhapi/credentials)의 계정을 사용한다. 여러 번 지정 가능. [LTA_PROFILES=a,b]')
+  common.add_argument('--all-profiles', dest='all_profiles', action='store_true', help='프로필 파일의 모든 계정을 사용한다. [LTA_PROFILES=all]')
 
   parser = ArgumentParser(description='Lottery Agent')
-  parser.add_argument('--headless', dest='headless', action='store_true', default=headless, help='enable headless mode. [LTA_HEADLESS=1]')
-  parser.add_argument('--no-headless', dest='headless', action='store_false', default=headless, help='disable headless mode. [LTA_HEADLESS=0]')
+  # 예전 Selenium 버전과의 호환용 (무시됨)
+  parser.add_argument('--headless', action='store_true', help=SUPPRESS)
+  parser.add_argument('--no-headless', action='store_true', help=SUPPRESS)
 
   subparsers = parser.add_subparsers(dest='command', help='sub-command help')
 
-  buy_parser = subparsers.add_parser('buy', help='buy lottery.')
+  buy_parser = subparsers.add_parser('buy', help='buy lotto 6/45.', parents=[common])
   buy_parser.add_argument('--dryrun', dest='dryrun', action='store_true', default=dryrun, help='run only up to the point of purchase. [LTA_DRYRUN=1]')
   buy_parser.add_argument('--no-dryrun', dest='dryrun', action='store_false', default=dryrun, help='run to the end. [LTA_DRYRUN=0]')
-  buy_parser.add_argument('--lo40', dest='lo40_count', metavar='n', type=lambda v: int_or_default(v, lo40_count), default=lo40_count, help='lotto 6/45 purchase quantity. [LTA_LO40_COUNT=n]')
-  buy_parser.add_argument('--lp72', dest='lp72_count', metavar='n', type=lambda v: int_or_default(v, lp72_count), default=lp72_count, help='annuity lottery 720+ purchase quantity. [LTA_LP72_COUNT=n]')
+  buy_parser.add_argument('--lo40', dest='lo40_count', metavar='n', type=lambda v: int_or_default(v, lo40_count), default=lo40_count, help='lotto 6/45 purchase quantity (max 5). [LTA_LO40_COUNT=n]')
+  # 연금복권은 더 이상 지원하지 않는다. 기존 GitHub Action 호환을 위해 인자만 받는다.
+  buy_parser.add_argument('--lp72', dest='lp72_count', type=lambda v: int_or_default(v, 0), default=0, help=SUPPRESS)
 
-  check_parser = subparsers.add_parser('check', help='verify that the lottery ticket has been won.')
-  check_parser = check_parser.add_argument('lottery', choices=['lo40', 'lp72'], help='select lottery.')
+  check_parser = subparsers.add_parser('check', help='verify that the lotto 6/45 ticket has been won.', parents=[common])
+  check_parser.add_argument('lottery', nargs='?', default='lo40', choices=['lo40', 'lp72'], help='select lottery. (lo40 only)')
+
+  subparsers.add_parser('balance', help='show balance.', parents=[common])
 
   args = parser.parse_args()
+  if not args.command:
+    parser.print_help()
+    sys.exit(1)
 
   print()
   print('Options')
   print('-------------------------------------')
-  print(f'headless = {args.headless}')
   if args.command == 'buy':
     print(f'dryrun = {args.dryrun}')
     print(f'lo40 = {args.lo40_count}')
-    print(f'lp72 = {args.lp72_count}')
+  if args.profiles or args.all_profiles:
+    print(f'profiles = {"all" if args.all_profiles else ", ".join(args.profiles)}')
   print('-------------------------------------')
   print()
 
   return args
 
-def create_driver(args: Namespace):
-  chrome_options = Options()
-  chrome_options.binary_location='/usr/bin/chromium'
-  if args.headless:
-    chrome_options.add_argument('headless')
-    chrome_options.add_argument('no-sandbox')
-    chrome_options.add_argument('disable-dev-shm-usage')
-    chrome_options.add_argument('window-size=1920x1080')
-    chrome_options.add_argument('disable-gpu')
-  chrome_options.add_experimental_option('excludeSwitches', ['disable-popup-blocking']) # 팝업 차단
-  chrome_options.set_capability('unhandledPromptBehavior', 'accept') # alert 통과
-
-  driver = webdriver.Chrome(options=chrome_options)
-  driver.implicitly_wait(10)
-  driver.execute_cdp_cmd( # navigator.platform 이 Win64를 리턴해야 모바일 페이지가 뜨지 않는다.
-    'Page.addScriptToEvaluateOnNewDocument',
-    {'source': "Object.defineProperty(navigator, 'platform', {get: () => 'Win64'})"}
-  )
-
-  return driver
-
-def do_lottery(args: Namespace, driver: WebDriver, message: Message):
-  userid = getenv('DHL_USERID')
-  if not userid:
-    raise Exception('should set DHL_USERID variable.')
-  password = getenv('DHL_PASSWORD')
-  if not password:
-    raise Exception('should set DHL_PASSWORD variable.')
-
-  dhlottery = DhLottery(driver)
-  dhlottery.login(userid, password)
+def run_account(args: Namespace, account: Account, message: Message) -> bool:
+  """계정 하나에 대해 명령을 실행한다. 실패가 있으면 False."""
+  dhlottery = DhLottery()
+  dhlottery.login(account.userid, account.password)
 
   if args.command == 'buy':
     message.add('동행 복권 구매 결과입니다.\n')
-
     message.add(f'실행전 잔고: {dhlottery.getBalance()}')
 
-    has_failure = False
+    if args.lp72_count > 0:
+      message.add('연금복권 720+ 는 더 이상 지원하지 않아 건너뜁니다.')
+
+    ok = True
     if args.lo40_count > 0:
       try:
-        result = dhlottery.buyLo40(args.lo40_count, args.dryrun)
-        message.add(result)
+        message.add(dhlottery.buyLo40(args.lo40_count, args.dryrun))
       except LotteryError as e:
-        has_failure = True
+        ok = False
         message.add(str(e))
-        if e.screenshot:
-          message.add_image(e.screenshot)
 
-    if args.lp72_count > 0:
-      try:
-        result = dhlottery.buyLp72(args.lp72_count, args.dryrun)
-        message.add(result)
-      except LotteryError as e:
-        has_failure = True
-        message.add(str(e))
-        if e.screenshot:
-          message.add_image(e.screenshot)
+    message.add(f'실행후 잔고: {dhlottery.getBalance()}')
+    return ok
 
-    # headless를 안 쓰는 건 개발할 때 화면을 보기 위해서다.
-    # 잔고를 조회하면 화면이 넘어가버려서 디버깅하기 어려워진다.
-    if args.headless and not has_failure:
-      message.add(f'실행후 잔고: {dhlottery.getBalance()}')
-  elif args.command == 'check':
-    try:
-      message.add(dhlottery.check(args.lottery.upper()))
-      # headless를 안 쓰는 건 개발할 때 화면을 보기 위해서다.
-      # 잔고를 조회하면 화면이 넘어가버려서 디버깅하기 어려워진다.
-      if args.headless:
-        message.add(f'잔고: {dhlottery.getBalance()}')
-    except LotteryError as e:
-      message.add(str(e))
-      if e.screenshot:
-        message.add_image(e.screenshot)
-  else:
-    raise Exception(f'not implemented command: {args.command}')
+  if args.command == 'check':
+    if args.lottery == 'lp72':
+      message.add('연금복권 720+ 는 더 이상 지원하지 않습니다.')
+      return True
+    message.add(dhlottery.check('LO40'))
+    message.add(f'잔고: {dhlottery.getBalance()}')
+    return True
 
-  message.send()
+  if args.command == 'balance':
+    info = dhlottery.get_balance_info()
+    message.add(f'구매가능금액: {info["available"]:,}원')
+    message.add(f'총예치금: {info["total"]:,}원')
+    if info['reserved']:
+      message.add(f'예약구매금액: {info["reserved"]:,}원')
+    if info['withdrawing']:
+      message.add(f'출금신청중금액: {info["withdrawing"]:,}원')
+    return True
 
-  if not args.headless:
-    sleep(3600)
+  raise Exception(f'not implemented command: {args.command}')
 
-  driver.quit()
-
-def take_screenshot(driver: WebDriver) -> bytes:
-  return driver.get_screenshot_as_png()
-userid = getenv('DHL_USERID')
-bottoken = getenv('TLG_BOTTOKEN')
-chatid = getenv('TLG_CHATID')
-message = Message(bottoken=bottoken, chatid=chatid, message=f'🤑🤑🤑 유저ID: {userid} 🤑🤑🤑')
-
-driver = None
-try:
+def main() -> int:
   show_welcome()
   args = get_args()
-  driver = create_driver(args)
-  do_lottery(args, driver, message)
-except Exception as e:
-  message.add(f'\n에러 발생: {e}')
-  if driver:
-    message.add_image(take_screenshot(driver))
-  message.send()
-  raise
+  bottoken = getenv('TLG_BOTTOKEN')
+  chatid = getenv('TLG_CHATID')
+
+  try:
+    accounts = resolve_accounts(args.profiles, args.all_profiles)
+  except Exception as e:
+    Message(bottoken=bottoken, chatid=chatid, message=f'에러 발생: {e}').send()
+    raise
+
+  print(f'대상 계정: {", ".join(a.userid for a in accounts)}')
+
+  failed = 0
+  for account in accounts:
+    message = Message(bottoken=bottoken, chatid=chatid, message=f'🤑🤑🤑 유저ID: {account.userid} 🤑🤑🤑')
+    try:
+      if not run_account(args, account, message):
+        failed += 1
+    except Exception as e:
+      failed += 1
+      traceback.print_exc()
+      message.add(f'\n에러 발생: {e}')
+    try:
+      message.send()
+    except Exception as e:
+      # 텔레그램 실패로 다음 계정 처리가 멈추면 안 된다. (에러 문구에 봇 토큰 URL 이 들어가므로 출력하지 않음)
+      print(f'⚠️ 텔레그램 전송 실패 ({type(e).__name__})')
+
+  if failed:
+    print(f'{len(accounts)}개 계정 중 {failed}개 계정에서 실패가 있었습니다.')
+    return 1
+  return 0
+
+if __name__ == '__main__':
+  sys.exit(main())

@@ -3,18 +3,43 @@ name: Lottery purchase
 on:
   schedule:
     - cron: 00 10 * * 1 # every Monday on 07:00 PM (KST)
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      lo40:
+        description: "로또 구매 수량"
+        required: true
+        default: "5"
+        type: choice
+        options: ["1", "2", "3", "4", "5"]
+      dryrun:
+        description: "구매 직전까지만 실행 (dryrun)"
+        required: false
+        default: false
+        type: boolean
+
+# 동시에 두 번 돌아서 중복 구매하지 않도록
+concurrency:
+  group: lottery-buy
+  cancel-in-progress: false
 
 jobs:
-  check:
+  buy:
     runs-on: ubuntu-latest
     steps:
-      - name: Check result
-        uses: ryube/lottery-buy-action@v1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          username: ${{ secrets.DHL_USERID }}
-          password: ${{ secrets.DHL_PASSWORD }}
-          telegram-bot-token: ${{ secrets.TLG_BOTTOKEN }}
-          telegram-chatid: ${{ secrets.TLG_CHATID }}
-          lo40: ${{ vars.LO40_COUNT }}
-          lp72: ${{ vars.LP72_COUNT }}
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Buy lotto 6/45
+        run: python main.py buy --lo40 "$LO40" $DRYRUN_FLAG
+        env:
+          LO40: ${{ inputs.lo40 || vars.LO40_COUNT || '5' }}
+          DRYRUN_FLAG: ${{ inputs.dryrun && '--dryrun' || '--no-dryrun' }}
+          DHL_USERID: ${{ secrets.DHL_USERID }}
+          DHL_PASSWORD: ${{ secrets.DHL_PASSWORD }}
+          DHL_USERID_2: ${{ secrets.DHL_USERID_2 }}
+          DHL_PASSWORD_2: ${{ secrets.DHL_PASSWORD_2 }}
+          TLG_BOTTOKEN: ${{ secrets.TLG_BOTTOKEN }}
+          TLG_CHATID: ${{ secrets.TLG_CHATID }}
